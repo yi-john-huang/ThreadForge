@@ -1,127 +1,183 @@
-console.log("ThreadForge Popup Script Loaded!");
+import { ExtensionSettings } from './types';
 
-document.addEventListener("DOMContentLoaded", () => {
-  const showButton = document.getElementById(
-    "showCommentsBtn"
-  ) as HTMLButtonElement;
-  const statusElement = document.getElementById("status");
-  const progressBar = document.getElementById(
-    "progressBar"
-  ) as HTMLProgressElement;
+interface PopupElements {
+  statusIndicator: HTMLElement;
+  statusText: HTMLElement;
+  statusDescription: HTMLElement;
+  enableInlineToggle: HTMLElement;
+  autoExpandToggle: HTMLElement;
+  refreshButton: HTMLButtonElement;
+  expandedCount: HTMLElement;
+  interceptedCount: HTMLElement;
+}
 
-  if (!showButton || !statusElement || !progressBar) {
-    console.error("Popup elements not found!");
-    if (statusElement) statusElement.textContent = "Popup UI Error.";
-    return;
+class PopupController {
+  private elements!: PopupElements;
+  private settings: ExtensionSettings = {
+    enableInlineExpansion: true,
+    autoExpandReplies: false,
+    maxReplyDepth: 3
+  };
+
+  constructor() {
+    this.init();
   }
 
-  // Function to update UI state
-  function updateUI(isLoading: boolean, message: string) {
-    if (statusElement) {
-      statusElement.textContent = message;
-    }
-    if (progressBar) {
-      progressBar.style.display = isLoading ? "block" : "none";
-      if (isLoading) {
-        progressBar.removeAttribute("value");
-      } else {
-        progressBar.value = progressBar.max;
-      }
-    }
-    if (showButton) {
-      showButton.disabled = isLoading;
-    }
-  }
-
-  // Check if the active tab is a Threads page
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const currentTab = tabs[0];
-    if (
-      !currentTab ||
-      !currentTab.id ||
-      !currentTab.url ||
-      (!currentTab.url.includes("threads.net") &&
-        !currentTab.url.includes("localhost"))
-    ) {
-      updateUI(true, "Not on a Threads page."); // Disable button
+  private async init(): Promise<void> {
+    console.log('🧵 ThreadForge Popup initializing...');
+    
+    // Wait for DOM to be ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => this.setupPopup());
     } else {
-      updateUI(false, "Ready to gather comments."); // Enable button
+      this.setupPopup();
     }
-  });
+  }
 
-  showButton.addEventListener("click", () => {
-    console.log("'Show Comments Panel' button clicked");
-    updateUI(true, "Gathering comments..."); // Show progress bar
+  private async setupPopup(): Promise<void> {
+    this.getElements();
+    this.setupEventListeners();
+    await this.loadSettings();
+    await this.checkTabStatus();
+    await this.loadStats();
+    this.updateUI();
+  }
 
-    // Find active tab
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const currentTab = tabs[0];
-      // Basic check needed again for safety
-      if (!currentTab || !currentTab.id) {
-        console.error("Could not get active tab ID.");
-        updateUI(false, "Error: Could not find active tab.");
+  private getElements(): void {
+    this.elements = {
+      statusIndicator: document.getElementById('statusIndicator')!,
+      statusText: document.getElementById('statusText')!,
+      statusDescription: document.getElementById('statusDescription')!,
+      enableInlineToggle: document.getElementById('enableInlineToggle')!,
+      autoExpandToggle: document.getElementById('autoExpandToggle')!,
+      refreshButton: document.getElementById('refreshButton') as HTMLButtonElement,
+      expandedCount: document.getElementById('expandedCount')!,
+      interceptedCount: document.getElementById('interceptedCount')!
+    };
+  }
+
+  private setupEventListeners(): void {
+    // Toggle switches
+    this.elements.enableInlineToggle.addEventListener('click', () => {
+      this.settings.enableInlineExpansion = !this.settings.enableInlineExpansion;
+      this.saveSettings();
+      this.updateUI();
+    });
+
+    this.elements.autoExpandToggle.addEventListener('click', () => {
+      this.settings.autoExpandReplies = !this.settings.autoExpandReplies;
+      this.saveSettings();
+      this.updateUI();
+    });
+
+    // Refresh button
+    this.elements.refreshButton.addEventListener('click', async () => {
+      await this.refreshCurrentTab();
+    });
+  }
+
+  private async loadSettings(): Promise<void> {
+    try {
+      const result = await chrome.storage.sync.get('threadForgeSettings');
+      if (result.threadForgeSettings) {
+        this.settings = { ...this.settings, ...result.threadForgeSettings };
+      }
+    } catch (error) {
+      console.warn('Failed to load settings:', error);
+    }
+  }
+
+  private async saveSettings(): Promise<void> {
+    try {
+      await chrome.storage.sync.set({
+        threadForgeSettings: this.settings
+      });
+      console.log('Settings saved:', this.settings);
+    } catch (error) {
+      console.error('Failed to save settings:', error);
+    }
+  }
+
+  private async checkTabStatus(): Promise<void> {
+    try {
+      const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      
+      if (!currentTab || !currentTab.url) {
+        this.setStatus('inactive', 'No active tab', 'Cannot detect current tab');
         return;
       }
-      const validTabId = currentTab.id; // Store ID
 
-      console.log(`Sending 'gatherComments' message to tab ID: ${validTabId}`);
+      const isThreadsPage = currentTab.url.includes('threads.com');
+      
+      if (isThreadsPage) {
+        this.setStatus('active', 'Active on Threads', 'Extension is running and ready to intercept clicks');
+      } else {
+        this.setStatus('inactive', 'Not on Threads', 'Visit threads.com to use this extension');
+      }
+    } catch (error) {
+      console.error('Failed to check tab status:', error);
+      this.setStatus('inactive', 'Error', 'Failed to check current tab status');
+    }
+  }
 
-      // Send message to content script to start gathering
-      chrome.tabs.sendMessage(
-        validTabId,
-        { action: "gatherComments" },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            console.error(
-              "Error sending/receiving gather message:",
-              chrome.runtime.lastError.message
-            );
-            updateUI(
-              false,
-              `Error: ${chrome.runtime.lastError.message || "No response from content script. Reload?"}`
-            );
-            return;
-          }
+  private setStatus(type: 'active' | 'inactive', text: string, description: string): void {
+    this.elements.statusIndicator.className = `status-indicator ${type === 'active' ? '' : 'inactive'}`;
+    this.elements.statusText.textContent = text;
+    this.elements.statusDescription.textContent = description;
+  }
 
-          if (response && response.success) {
-            console.log("Received comment data:", response.data);
-            updateUI(true, "Displaying panel..."); // Keep progress bar for display step
+  private async loadStats(): Promise<void> {
+    try {
+      const result = await chrome.storage.local.get(['expandedCount', 'interceptedCount']);
+      
+      this.elements.expandedCount.textContent = (result.expandedCount || 0).toString();
+      this.elements.interceptedCount.textContent = (result.interceptedCount || 0).toString();
+    } catch (error) {
+      console.warn('Failed to load stats:', error);
+      this.elements.expandedCount.textContent = '0';
+      this.elements.interceptedCount.textContent = '0';
+    }
+  }
 
-            // Send another message to display the data
-            chrome.tabs.sendMessage(
-              validTabId,
-              { action: "displayComments", data: response.data },
-              (displayResponse) => {
-                let finalStatus = "";
-                if (chrome.runtime.lastError) {
-                  console.error(
-                    "Error sending display message:",
-                    chrome.runtime.lastError.message
-                  );
-                  finalStatus = `Error displaying panel: ${chrome.runtime.lastError.message || "Unknown error."}`;
-                } else if (displayResponse && displayResponse.success) {
-                  finalStatus = "Panel displayed!";
-                } else {
-                  finalStatus =
-                    "Panel display failed or script did not respond.";
-                }
-                updateUI(false, finalStatus); // Hide progress, show final status
-                // Close the popup after a short delay
-                setTimeout(() => window.close(), 2000);
-              }
-            );
-          } else {
-            console.error("Failed to gather comments:", response);
-            updateUI(
-              false,
-              `Failed: ${response?.error || "Unknown error gathering comments."}`
-            );
-          }
-        }
-      );
-    });
-  });
-});
+  private updateUI(): void {
+    // Update toggle states
+    this.elements.enableInlineToggle.classList.toggle('active', this.settings.enableInlineExpansion);
+    this.elements.autoExpandToggle.classList.toggle('active', this.settings.autoExpandReplies);
+    
+    // Disable auto-expand toggle if inline expansion is disabled
+    this.elements.autoExpandToggle.style.opacity = this.settings.enableInlineExpansion ? '1' : '0.5';
+    this.elements.autoExpandToggle.style.pointerEvents = this.settings.enableInlineExpansion ? 'auto' : 'none';
+  }
 
-// Add your popup script logic here
-// This script runs when the extension icon is clicked
+  private async refreshCurrentTab(): Promise<void> {
+    try {
+      this.elements.refreshButton.disabled = true;
+      this.elements.refreshButton.textContent = '🔄 Refreshing...';
+      
+      const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      
+      if (currentTab?.id) {
+        await chrome.tabs.reload(currentTab.id);
+        
+        // Update button text temporarily
+        this.elements.refreshButton.textContent = '✅ Refreshed!';
+        
+        setTimeout(() => {
+          this.elements.refreshButton.textContent = '🔄 Refresh Current Tab';
+          this.elements.refreshButton.disabled = false;
+        }, 1500);
+      }
+    } catch (error) {
+      console.error('Failed to refresh tab:', error);
+      this.elements.refreshButton.textContent = '❌ Refresh Failed';
+      this.elements.refreshButton.disabled = false;
+      
+      setTimeout(() => {
+        this.elements.refreshButton.textContent = '🔄 Refresh Current Tab';
+      }, 2000);
+    }
+  }
+}
+
+// Initialize popup when DOM is ready
+new PopupController();

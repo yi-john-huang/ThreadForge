@@ -1,73 +1,258 @@
-<!doctype html>
-<html>
-  <head>
-    <title>ThreadForge</title>
-    <style>
-      body {
-        width: 250px;
-        font-family: sans-serif;
-        padding: 10px;
-        background-color: #f0f2f5;
-      }
-      h1 {
-        font-size: 16px;
-        color: #1c1e21;
-        margin-bottom: 15px;
-        text-align: center;
-      }
-      button {
-        width: 100%;
-        padding: 10px;
-        font-size: 14px;
-        background-color: #0095f6;
-        color: white;
-        border: none;
-        border-radius: 6px;
-        cursor: pointer;
-        transition: background-color 0.2s ease;
-      }
-      button:hover {
-        background-color: #0081d7;
-      }
-      button:disabled {
-        background-color: #ccc;
-        cursor: not-allowed;
-      }
-      #status {
-        margin-top: 10px;
-        text-align: center;
-        font-size: 12px;
-        color: #65676b;
-        min-height: 15px; /* Reserve space */
-      }
-      progress {
-        width: 100%;
-        height: 8px;
-        margin-top: 10px;
-        display: none; /* Hidden by default */
-      }
-      /* Style the progress bar appearance */
-      progress::-webkit-progress-bar {
-        background-color: #e0e0e0;
-        border-radius: 4px;
-      }
-      progress::-webkit-progress-value {
-        background-color: #0095f6;
-        border-radius: 4px;
-        transition: width 0.1s ease;
-      }
-      progress::-moz-progress-bar {
-        /* Firefox */
-        background-color: #0095f6;
-        border-radius: 4px;
-      }
-    </style>
-  </head>
-  <body>
-    <h1>ThreadForge</h1>
-    <button id="showCommentsBtn">Show Comments Panel</button>
-    <progress id="progressBar"></progress>
-    <div id="status"></div>
-    <script src="../popup.js"></script>
-  </body>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ThreadForge UI Improver</title>
+  <style>
+    body {
+      width: 350px;
+      min-height: 400px;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .header {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      padding: 20px;
+      color: white;
+      text-align: center;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .header p {
+      margin: 8px 0 0;
+      font-size: 13px;
+      opacity: 0.9;
+    }
+
+    .content {
+      padding: 20px;
+    }
+
+    .status-card {
+      background: white;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+
+    .status-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .status-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #22c55e;
+    }
+
+    .status-indicator.inactive {
+      background: #ef4444;
+    }
+
+    .status-text {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1f2937;
+    }
+
+    .status-description {
+      font-size: 12px;
+      color: #6b7280;
+      margin: 0;
+    }
+
+    .settings-section {
+      background: white;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1f2937;
+      margin-bottom: 12px;
+    }
+
+    .setting-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f4f6;
+    }
+
+    .setting-item:last-child {
+      border-bottom: none;
+    }
+
+    .setting-label {
+      font-size: 13px;
+      color: #374151;
+    }
+
+    .toggle-switch {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      background: #d1d5db;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+
+    .toggle-switch.active {
+      background: #3b82f6;
+    }
+
+    .toggle-slider {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 20px;
+      height: 20px;
+      background: white;
+      border-radius: 50%;
+      transition: transform 0.3s;
+    }
+
+    .toggle-switch.active .toggle-slider {
+      transform: translateX(20px);
+    }
+
+    .action-button {
+      width: 100%;
+      background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+      color: white;
+      border: none;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .action-button:hover {
+      background: linear-gradient(135deg, #1d4ed8, #1e40af);
+      transform: translateY(-1px);
+    }
+
+    .action-button:disabled {
+      background: #d1d5db;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .stat-item {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+      color: white;
+    }
+
+    .stat-number {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      opacity: 0.8;
+    }
+
+    .footer {
+      padding: 16px 20px;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.8);
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🧵 ThreadForge UI</h1>
+    <p>Inline comment expansion for Threads</p>
+  </div>
+
+  <div class="content">
+    <div class="status-card">
+      <div class="status-header">
+        <div class="status-indicator" id="statusIndicator"></div>
+        <span class="status-text" id="statusText">Checking status...</span>
+      </div>
+      <p class="status-description" id="statusDescription">Loading extension status...</p>
+    </div>
+
+    <div class="settings-section">
+      <div class="section-title">⚙️ Settings</div>
+      
+      <div class="setting-item">
+        <span class="setting-label">Enable inline expansion</span>
+        <div class="toggle-switch" id="enableInlineToggle">
+          <div class="toggle-slider"></div>
+        </div>
+      </div>
+      
+      <div class="setting-item">
+        <span class="setting-label">Auto-expand replies</span>
+        <div class="toggle-switch" id="autoExpandToggle">
+          <div class="toggle-slider"></div>
+        </div>
+      </div>
+    </div>
+
+    <button class="action-button" id="refreshButton">
+      🔄 Refresh Current Tab
+    </button>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-item">
+      <div class="stat-number" id="expandedCount">0</div>
+      <div class="stat-label">Expanded Today</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-number" id="interceptedCount">0</div>
+      <div class="stat-label">Clicks Intercepted</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    ThreadForge UI Improver v1.0.0
+  </div>
+
+  <script src="popup.js"></script>
+</body>
 </html>
