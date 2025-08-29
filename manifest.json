@@ -1,25 +1,31 @@
 {
   "manifest_version": 3,
-  "name": "ThreadForge",
-  "version": "0.1.0",
-  "description": "Enhances the Threads experience.",
+  "name": "ThreadForge - UI Improver",
+  "version": "1.0.0",
+  "description": "Improves Threads UI by enabling inline comment expansion instead of page redirects",
   "permissions": [
-    "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.threads.com/*",
+    "https://threads.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://www.threads.net/*"
+        "https://www.threads.com/*",
+        "https://threads.com/*"
       ],
       "js": [
         "content.js"
-      ]
+      ],
+      "run_at": "document_end"
     }
   ],
   "action": {
-    "default_popup": "src/popup.html",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
@@ -30,5 +36,11 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
-} 
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content.js"],
+      "matches": ["https://www.threads.com/*", "https://threads.com/*"]
+    }
+  ]
+}
