@@ -2,8 +2,6 @@
 
 A Chrome extension that improves the Threads experience by enabling **inline comment expansion** instead of navigating to new pages.
 
-![ThreadForge Banner](https://via.placeholder.com/800x200/667eea/ffffff?text=ThreadForge+UI+Improver)
-
 ## ✨ Features
 
 - **🔗 Inline Comment Expansion**: Click on comments to expand replies directly in the current page instead of navigating to a new page
