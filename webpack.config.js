@@ -1,10 +1,10 @@
 const path = require('path');
-const CopyPlugin = require('copy-webpack-plugin');
+const CopyWebpackPlugin = require('copy-webpack-plugin');
 
 module.exports = {
   entry: {
     content: './src/content.ts',
-    popup: './src/popup.ts'
+    popup: './src/popup.ts',
   },
   module: {
     rules: [
@@ -21,17 +21,15 @@ module.exports = {
   output: {
     filename: '[name].js',
     path: path.resolve(__dirname, 'dist'),
-    clean: true, // Clean the output directory before emit.
+    clean: true,
   },
   plugins: [
-    new CopyPlugin({
+    new CopyWebpackPlugin({
       patterns: [
-        { from: "manifest.json", to: "." },
-        { from: "src/popup.html", to: "src" }, // Copy popup.html to dist/src
-        { from: "icons", to: "icons" }, // Copy icons directory
+        { from: 'manifest.json', to: 'manifest.json' },
+        { from: 'src/popup.html', to: 'popup.html' },
+        { from: 'icons', to: 'icons', noErrorOnMissing: true },
       ],
     }),
   ],
-  // Optional: Add source maps for easier debugging
-  devtool: 'cheap-module-source-map',
-}; 
+};

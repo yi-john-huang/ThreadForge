@@ -1,18 +1,26 @@
 {
   "compilerOptions": {
-    "target": "ES2016", /* Set the JavaScript language version for emitted JavaScript and include compatible library declarations. */
-    "module": "CommonJS", /* Specify what module code is generated. */
-    "outDir": "./dist", /* Specify an output folder for all emitted files. */
-    "esModuleInterop": true, /* Emit additional JavaScript to ease support for importing CommonJS modules. This enables `allowSyntheticDefaultImports` for type compatibility. */
-    "forceConsistentCasingInFileNames": true, /* Ensure that casing is correct in imports. */
-    "strict": true, /* Enable all strict type-checking options. */
-    "skipLibCheck": true /* Skip type checking all .d.ts files. */
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": false,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types": ["chrome"]
   },
   "include": [
-    "src/**/*" /* Include all files in the src directory */
+    "src/**/*"
   ],
   "exclude": [
-    "node_modules", /* Exclude node_modules */
-    "dist" /* Exclude the output directory */
+    "node_modules",
+    "dist"
   ]
-} 
+}
