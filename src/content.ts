@@ -1,468 +1,472 @@
-console.log("ThreadForge Content Script Loaded!");
+import { CommentData, ClickInterceptionResult, CommentExtractorOptions } from './types';
 
-// Example: Modify the background color of the page
-// document.body.style.backgroundColor = 'lightblue';
+console.log('🧵 ThreadForge UI Improver loaded!');
 
-// Add your content script logic here
-// This script runs in the context of the Threads webpage
+class ThreadForgeUIImprover {
+  private settings = {
+    enableInlineExpansion: true,
+    autoExpandReplies: false,
+    maxReplyDepth: 3
+  };
 
-// --- Expand All Comments Feature ---
+  private expandedComments = new Set<string>();
+  private isInitialized = false;
 
-const MAX_EXPAND_ITERATIONS = 30;
-const EXPAND_DELAY_MS = 800; // Adjusted delay for stability
-
-// Specific selectors based on review
-const SPECIFIC_EXPAND_SELECTORS = [
-  'button[aria-label*="View replies"]',
-  'button[data-testid="more-replies"]',
-  'button[aria-label*="Load more"]', // Adding common variations
-  'button[aria-label*="Show more"]',
-];
-
-// Fallback terms for text-based search
-const FALLBACK_REPLIES_TERMS = [
-  "view replies",
-  "more replies",
-  "view more",
-  "replies",
-  "查看",
-  "回复",
-  "更多",
-];
-
-// Import enhanced data models
-import { CommentData, OverlayState, ExpandState, PerformanceMetrics, ViewportState, ErrorType } from './types';
-
-// Function to delay execution
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Find elements using specific selectors, text fallbacks, and potential comment bodies
-function findAllPossibleExpandElements(): HTMLElement[] {
-  console.log("Searching for expand elements (Buttons, Links, Comments)...");
-  let elements: HTMLElement[] = [];
-
-  // --- Step 1: Prioritize specific dedicated buttons/links ---
-  console.log("Searching for specific buttons/links...");
-  for (const selector of SPECIFIC_EXPAND_SELECTORS) {
-    try {
-      const found = Array.from(
-        document.querySelectorAll<HTMLElement>(selector)
-      );
-      elements.push(...found);
-    } catch (e) {
-      console.warn(`Error querying selector: ${selector}`, e);
-    }
+  constructor() {
+    this.init();
   }
-  console.log(
-    `Found ${elements.length} elements using specific button/link selectors.`
-  );
 
-  // --- Step 2: Fallback search for text indicating replies ---
-  console.log("Searching for fallback text elements (spans/divs)...");
-  const potentialTextElements = Array.from(
-    document.querySelectorAll<HTMLElement>(
-      'span, div[role="button"], div[tabindex="0"]'
-    )
-  );
-  for (const el of potentialTextElements) {
-    if (elements.includes(el)) continue; // Skip if already found
+  private async init(): Promise<void> {
+    if (this.isInitialized) return;
+    
+    console.log('🚀 Initializing ThreadForge UI Improver...');
+    
+    // Load settings from storage
+    await this.loadSettings();
+    
+    // Setup click interception
+    this.setupClickInterception();
+    
+    // Setup mutation observer for dynamic content
+    this.setupMutationObserver();
+    
+    // Add custom styles
+    this.addCustomStyles();
+    
+    this.isInitialized = true;
+    console.log('✅ ThreadForge UI Improver initialized successfully!');
+  }
+
+  private async loadSettings(): Promise<void> {
     try {
-      const text = el.textContent?.toLowerCase().trim() || "";
-      if (
-        FALLBACK_REPLIES_TERMS.some((term) => text.includes(term.toLowerCase()))
-      ) {
-        console.log(`Found fallback text element: "${text}"`);
-        elements.push(el);
+      const result = await chrome.storage.sync.get('threadForgeSettings');
+      if (result.threadForgeSettings) {
+        this.settings = { ...this.settings, ...result.threadForgeSettings };
       }
-    } catch (e) {
-      console.warn("Error processing fallback text element:", e);
+    } catch (error) {
+      console.warn('Failed to load settings, using defaults:', error);
     }
   }
 
-  // --- Step 3: Identify potential comment elements that might hide replies ---
-  // Comments themselves might be clickable to reveal replies.
-  // We target potential comment containers (e.g., articles within articles)
-  // or divs that contain reply indicators but aren't the indicators themselves.
-  console.log("Searching for potentially clickable comment bodies...");
-  // Selector for comment containers - adjust if needed based on Threads structure
-  const commentContainerSelector = 'article div[role="article"]'; // Article within an article
-  const potentialCommentContainers = Array.from(
-    document.querySelectorAll<HTMLElement>(commentContainerSelector)
-  );
+  private setupClickInterception(): void {
+    document.addEventListener('click', this.handleClick.bind(this), true);
+  }
 
-  for (const container of potentialCommentContainers) {
-    if (elements.includes(container)) continue; // Skip if already targeted
-
-    // Check if this container likely has hidden replies that aren't already targeted by a button
-    // Heuristic: Look for reply text *within* the container, but *not* in an already targeted element.
-    const hasReplyText = Array.from(
-      container.querySelectorAll<HTMLElement>("span, div")
-    ).some((innerEl) => {
-      if (elements.includes(innerEl)) return false; // Don't double-count if the text itself is targeted
-      const text = innerEl.textContent?.toLowerCase().trim() || "";
-      // Look for numbers + reply terms, or just reply terms
-      return (
-        (/\d+/.test(text) &&
-          FALLBACK_REPLIES_TERMS.some((term) => text.includes(term))) ||
-        FALLBACK_REPLIES_TERMS.some((term) => text === term)
-      ); // Exact match for simple terms like 'replies'
+  private setupMutationObserver(): void {
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.type === 'childList') {
+          mutation.addedNodes.forEach((node) => {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              this.processNewContent(node as Element);
+            }
+          });
+        }
+      });
     });
 
-    if (hasReplyText) {
-      console.log(
-        `Found potential comment container to click (has reply text inside):`,
-        container
-      );
-      // We might need to click the container itself, or a specific child?
-      // For now, let's target the container.
-      elements.push(container);
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  private processNewContent(container: Element): void {
+    // Find comment containers in new content
+    const commentElements = container.querySelectorAll('div[data-pressable-container="true"]');
+    
+    commentElements.forEach((element) => {
+      this.markPotentiallyExpandableComment(element as HTMLElement);
+    });
+  }
+
+  private markPotentiallyExpandableComment(element: HTMLElement): void {
+    // Check if this element has characteristics of a clickable comment
+    const hasAuthor = element.querySelector('a[href*="/@"]');
+    const hasText = element.textContent && element.textContent.trim().length > 20;
+    
+    if (hasAuthor && hasText) {
+      element.setAttribute('data-threadforge-expandable', 'true');
     }
   }
 
-  // --- Step 4: Filter for visible, not-yet-clicked, and useful elements ---
-  const visibleAndNewElements = elements.filter((el) => {
+  private handleClick(event: MouseEvent): void {
+    if (!this.settings.enableInlineExpansion) return;
+
+    const result = this.interceptCommentClick(event);
+    if (result.intercepted && result.commentUrl && result.element) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.expandCommentInline(result.element, result.commentUrl);
+    }
+  }
+
+  private interceptCommentClick(event: MouseEvent): ClickInterceptionResult {
+    const target = event.target as Element;
+    if (!target) return { intercepted: false };
+
+    // Find the closest comment container
+    const commentContainer = target.closest('div[data-threadforge-expandable="true"]') as HTMLElement;
+    if (!commentContainer) return { intercepted: false };
+
+    // Check if the click is on a link that would navigate to a comment page
+    const clickedLink = target.closest('a[href]') as HTMLAnchorElement;
+    if (!clickedLink) return { intercepted: false };
+
+    // Check if this looks like a comment navigation link
+    const isCommentNavigation = this.isCommentNavigationLink(clickedLink.href);
+    
+    if (isCommentNavigation) {
+      console.log('🔗 Intercepting comment click for inline expansion:', clickedLink.href);
+      return {
+        intercepted: true,
+        commentUrl: clickedLink.href,
+        element: commentContainer
+      };
+    }
+
+    return { intercepted: false };
+  }
+
+  private isCommentNavigationLink(href: string): boolean {
+    return href.includes('threads.com') && 
+           href.includes('/post/') &&
+           !href.includes('photo/') &&
+           !href.includes('video/') &&
+           !href.includes('edit');
+  }
+
+  private async expandCommentInline(commentContainer: HTMLElement, commentUrl: string): Promise<void> {
+    const commentId = this.getCommentId(commentContainer);
+    
+    // Check if already expanded
+    if (this.expandedComments.has(commentId) || 
+        commentContainer.querySelector('.threadforge-inline-expansion')) {
+      return;
+    }
+
+    this.expandedComments.add(commentId);
+    
+    // Show loading state
+    const loadingDiv = this.createLoadingElement();
+    commentContainer.appendChild(loadingDiv);
+
     try {
-      if (!el || !isElementVisible(el) || el.hasAttribute("data-tf-clicked")) {
-        return false;
-      }
-      // Avoid clicking elements that are *inside* something already marked as clicked
-      if (el.closest('[data-tf-clicked="true"]')) {
-        // console.log("Skipping element inside already-clicked container:", el);
-        return false;
-      }
-      return true;
-    } catch (e) {
-      console.warn("Error filtering element:", e);
-      return false;
-    }
-  });
-
-  // --- Step 5: Deduplicate ---
-  const uniqueElements = Array.from(new Set(visibleAndNewElements));
-
-  console.log(
-    `Found ${uniqueElements.length} unique, visible, and new potential expand elements to click.`
-  );
-  return uniqueElements;
-}
-
-// Helper to check if an element is visible
-function isElementVisible(el: HTMLElement): boolean {
-  if (!el) return false;
-  try {
-    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-  } catch (e) {
-    console.warn("Error checking element visibility:", e);
-    return false;
-  }
-}
-
-// For debugging - highlight elements so we can see what we're finding
-function highlightElement(el: HTMLElement): void {
-  if (!el) return;
-  try {
-    const originalBackground = el.style.backgroundColor;
-    const originalOutline = el.style.outline;
-
-    el.style.backgroundColor = "rgba(255, 165, 0, 0.3)"; // Orange highlight
-    el.style.outline = "2px solid orange";
-
-    setTimeout(() => {
-      // Check if element still exists before resetting styles
-      if (document.body.contains(el)) {
-        el.style.backgroundColor = originalBackground;
-        el.style.outline = originalOutline;
-      }
-    }, 1500); // Highlight duration
-  } catch (e) {
-    console.warn("Error highlighting element:", e);
-  }
-}
-
-// --- Core Logic ---
-
-// Renamed function - This will only run the loop to click expand buttons
-async function runExpansionLoop(): Promise<void> {
-  console.log("Starting expansion loop...");
-  let iterations = 0;
-  let foundAnyInLastIteration = true;
-  let totalClicked = 0;
-
-  while (foundAnyInLastIteration && iterations < MAX_EXPAND_ITERATIONS) {
-    iterations++;
-    console.log(
-      `Expansion Iteration ${iterations}: Looking for expand elements...`
-    );
-    await sleep(500);
-    let expandElements = findAllPossibleExpandElements();
-
-    if (expandElements.length === 0) {
-      if (foundAnyInLastIteration) {
-        console.log("No elements found, waiting and retrying once more...");
-        await sleep(1500);
-        expandElements = findAllPossibleExpandElements();
-        if (expandElements.length === 0) {
-          foundAnyInLastIteration = false;
-        }
-      } else {
-        foundAnyInLastIteration = false;
-      }
-      if (!foundAnyInLastIteration) {
-        console.log(
-          "No expandable elements found in this iteration or retry. Stopping loop."
-        );
-        continue;
-      }
-    }
-
-    foundAnyInLastIteration = expandElements.length > 0;
-    console.log(
-      `Found ${expandElements.length} potential elements to click in iteration ${iterations}.`
-    );
-
-    for (const el of expandElements) {
-      if (!el) continue;
-      try {
-        const text =
-          el.getAttribute("aria-label") ||
-          el.textContent?.trim() ||
-          "[No Text]";
-        console.log(`Attempting to click element: "${text}"`);
-        // highlightElement(el); // Optional: Keep for debugging if needed
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        await sleep(300);
-        if (!isElementVisible(el)) {
-          console.warn(
-            `Element "${text}" not visible after scroll, skipping click.`
-          );
-          continue;
-        }
-        el.click();
-        el.setAttribute("data-tf-clicked", "true");
-        totalClicked++;
-        console.log(`Clicked element "${text}" successfully.`);
-        await sleep(EXPAND_DELAY_MS);
-      } catch (err) {
-        const errorText = el
-          ? el.getAttribute("aria-label") ||
-            el.textContent?.trim() ||
-            "[Element exists but no text]"
-          : "[Element is null]";
-        console.error(`Error clicking element "${errorText}":`, err);
-      }
-    }
-    if (expandElements.length > 0) {
-      await sleep(1000);
-    }
-  }
-  console.log(
-    `Finished expansion loop. Clicked ${totalClicked} elements in ${iterations} iterations.`
-  );
-  if (iterations >= MAX_EXPAND_ITERATIONS) {
-    console.warn("Reached maximum expansion iterations");
-  }
-
-  // Clean up clicked markers after loop finishes
-  document.querySelectorAll('[data-tf-clicked="true"]').forEach((el) => {
-    try {
-      el.removeAttribute("data-tf-clicked");
-    } catch (e) {
-      /* Ignore */
-    }
-  });
-}
-
-// Function to scrape data from a single comment element and its replies
-function scrapeSingleComment(commentElement: HTMLElement): CommentData | null {
-  if (!commentElement) return null;
-
-  // Generate unique ID for each comment
-  const id = `comment-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
-  // --- Selectors (These are examples - NEED INSPECTION on Threads.net) ---
-  const authorLink = commentElement.querySelector<HTMLAnchorElement>(
-    'a[href*="/profile/"]'
-  );
-  const authorSpan = commentElement.querySelector<HTMLElement>(
-    'span[style*="font-weight: 600"]'
-  );
-  const author =
-    authorLink?.href.split("/").pop() ||
-    authorSpan?.textContent?.trim() ||
-    null;
-
-  // Try to find the main text content
-  // Look for divs directly under the main container, avoiding nested articles/buttons
-  let textContent = "";
-  // Simple approach: find the first non-empty div/span text that is not an author or button
-  const potentialTextElements = Array.from(
-    commentElement.querySelectorAll<HTMLElement>("div > span, div > div")
-  );
-  for (const el of potentialTextElements) {
-    // Basic checks to avoid scraping buttons, nested articles, etc.
-    if (el.closest('button, a, article div[role="article"]')) continue;
-    const text = el.textContent?.trim();
-    if (
-      text &&
-      text !== author &&
-      !FALLBACK_REPLIES_TERMS.some((term) =>
-        text.toLowerCase().includes(term)
-      ) &&
-      !/\d+\s*(replies|reply|more)/i.test(text)
-    ) {
-      textContent = text; // Take the first suitable text block
-      break;
-    }
-  }
-  const text = textContent || null;
-
-  // Try to find timestamp (example selector)
-  const timeElement = commentElement.querySelector<HTMLTimeElement>("time");
-  const timestamp =
-    timeElement?.getAttribute("datetime") ||
-    timeElement?.textContent?.trim() ||
-    null;
-
-  // --- Recursively scrape replies ---
-  const replies: CommentData[] = [];
-  // *** CHANGE: Look for nested divs with role="article" ***
-  const replyElements = Array.from(
-    commentElement.querySelectorAll<HTMLElement>(':scope div[role="article"]') 
-  ); 
-  // console.log(`Found ${replyElements.length} potential reply elements for comment by ${author}`);
-  for (const replyEl of replyElements) {
-    const scrapedReply = scrapeSingleComment(replyEl);
-    if (scrapedReply) {
-      replies.push(scrapedReply);
-    }
-  }
-
-  // Basic validation - only return if we found some text or author
-  if (author || text) {
-    return { id, author, text, timestamp, replies };
-  }
-
-  return null; // Ignore elements that don't seem like valid comments
-}
-
-// Main scraping function - Simplified approach using role="article"
-function scrapeCommentData(): CommentData[] { 
-  console.log("Scraping actual comment data using role='article'...");
-  const comments: CommentData[] = [];
-
-  // --- Find ALL divs with role="article" on the page ---
-  const allArticleElements = Array.from(
-    document.querySelectorAll<HTMLElement>('div[role="article"]') // *** CHANGED SELECTOR ***
-  );
-  console.log(`Found ${allArticleElements.length} total div[role="article"] elements.`);
-
-  if (allArticleElements.length === 0) {
-    console.warn("No <div role='article'> elements found on the page at all.");
-    return []; // Nothing to scrape
-  }
-  
-  // --- Filter to find likely top-level comments ---
-  // Assume top-level comments are role=article divs not nested within others.
-  let topLevelCommentCount = 0;
-  for (const el of allArticleElements) {
-    try {
-      // Check if the element is still in the DOM and visible
-      if (!document.body.contains(el) || !isElementVisible(el)) continue; 
-
-      // Check if its closest role=article ancestor is itself
-      const parentArticle = el.parentElement?.closest('div[role="article"]'); // *** CHECK NESTING ***
-      if (!parentArticle || parentArticle === el) { 
-        // This is likely a top-level comment or the main post
-         console.log("Processing potential top-level div[role='article']:", el);
-         topLevelCommentCount++;
-         const scrapedComment = scrapeSingleComment(el);
-         if (scrapedComment) {
-             comments.push(scrapedComment);
-         }
-      }
-    } catch (e) {
-      console.error("Error processing a div[role='article'] element:", el, e);
-    }
-  }
-
-  console.log(`Finished scraping. Processed ${topLevelCommentCount} potential top-level items, extracted ${comments.length} comments/posts.`);
-  // TODO: Might need logic here to differentiate the main post from the first comment if structure is identical.
-  return comments;
-}
-
-// Placeholder function for displaying the panel - TO BE IMPLEMENTED
-function displayCommentsInPanel(commentsData: any[]): void {
-  console.log("Displaying comments in panel... (Placeholder)", commentsData);
-  // TODO: Implement panel creation and population logic here.
-  alert(
-    "Comment Panel Display (Not Implemented Yet)\n\n" +
-      JSON.stringify(commentsData, null, 2)
-  );
-}
-
-// --- Message Listener ---
-
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log(
-    "Message received from:",
-    sender.tab ? "content script:" + sender.tab.url : "extension"
-  );
-  console.log("Request action:", request.action);
-
-  if (request.action === "gatherComments") {
-    console.log("Gathering comments action triggered...");
-    // Use an async IIFE to handle the async operations
-    (async () => {
-      try {
-        // Optional: Add visual indicator like a temporary banner
-        // showStatusIndicator("Expanding comments...");
-
-        await runExpansionLoop();
-
-        // Optional: Update status
-        // showStatusIndicator("Scraping comments...");
-
-        const commentsData = scrapeCommentData();
-
-        console.log("Sending comment data back to popup.");
-        sendResponse({ success: true, data: commentsData });
-
-        // Optional: Remove indicator
-        // hideStatusIndicator();
-      } catch (error) {
-        console.error("Error during comment gathering:", error);
-        // Optional: Remove indicator
-        // hideStatusIndicator();
-        sendResponse({
-          success: false,
-          error: (error as Error).message || "Unknown error during gathering",
-        });
-      }
-    })();
-
-    return true; // Indicates that the response is sent asynchronously
-  } else if (request.action === "displayComments") {
-    console.log("Displaying comments action triggered...");
-    try {
-      displayCommentsInPanel(request.data);
-      sendResponse({ success: true }); // Acknowledge display command
+      // Fetch comment data (mock for now)
+      const commentData = await this.fetchCommentData(commentUrl);
+      
+      // Remove loading
+      loadingDiv.remove();
+      
+      // Create and show expansion
+      const expansionDiv = this.createExpansionElement(commentData, commentId);
+      commentContainer.appendChild(expansionDiv);
+      
+      // Scroll into view
+      expansionDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      
     } catch (error) {
-      console.error("Error displaying comments panel:", error);
-      sendResponse({
-        success: false,
-        error: (error as Error).message || "Unknown error during display",
-      });
+      console.error('❌ Error expanding comment:', error);
+      loadingDiv.innerHTML = this.getErrorHTML(commentId);
     }
-    return false; // Response is synchronous for display command
   }
 
-  // Handle other potential messages if needed
-  console.log("Unknown action received:", request.action);
-  return false; // Indicate synchronous response for unknown actions
-});
+  private getCommentId(element: HTMLElement): string {
+    return `comment-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
 
-// --- Initial setup ---
-// Removed observer logic as it's no longer needed for button injection
-console.log("ThreadForge Content Script initialized and listener ready.");
+  private createLoadingElement(): HTMLElement {
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'threadforge-inline-expansion threadforge-loading';
+    loadingDiv.innerHTML = `
+      <div class="threadforge-loading-content">
+        <div class="threadforge-spinner"></div>
+        <span>Loading replies...</span>
+      </div>
+    `;
+    return loadingDiv;
+  }
+
+  private async fetchCommentData(url: string): Promise<CommentData[]> {
+    // In a real implementation, this would fetch the actual comment page
+    // For now, we'll simulate with mock data
+    await this.sleep(1500);
+    
+    const mockReplies: CommentData[] = [
+      {
+        id: '1',
+        author: 'alice_dev',
+        text: 'Really interesting perspective! I\'ve been thinking about this too.',
+        timestamp: '2 hours ago'
+      },
+      {
+        id: '2', 
+        author: 'bob_coder',
+        text: 'Thanks for sharing this. The integration with Claude Code looks promising!',
+        timestamp: '1 hour ago'
+      },
+      {
+        id: '3',
+        author: 'charlie_tech',
+        text: 'I wonder how this compares to VSCode\'s implementation. Any thoughts?',
+        timestamp: '30 minutes ago'
+      }
+    ];
+    
+    // Randomly return different numbers of replies
+    const numReplies = Math.floor(Math.random() * 4);
+    return mockReplies.slice(0, numReplies);
+  }
+
+  private createExpansionElement(replies: CommentData[], commentId: string): HTMLElement {
+    const expansionDiv = document.createElement('div');
+    expansionDiv.className = 'threadforge-inline-expansion';
+    
+    if (replies.length > 0) {
+      expansionDiv.innerHTML = `
+        <div class="threadforge-replies-container">
+          <div class="threadforge-replies-header">
+            <span class="threadforge-reply-count">
+              💬 ${replies.length} ${replies.length === 1 ? 'Reply' : 'Replies'}
+            </span>
+          </div>
+          <div class="threadforge-replies-list">
+            ${replies.map(reply => this.createReplyHTML(reply)).join('')}
+          </div>
+          <button class="threadforge-close-btn" onclick="this.parentElement.parentElement.remove(); window.threadForgeInstance?.onCommentClosed('${commentId}')">
+            Close Replies
+          </button>
+        </div>
+      `;
+    } else {
+      expansionDiv.innerHTML = `
+        <div class="threadforge-replies-container">
+          <div class="threadforge-no-replies">
+            <span>💭 No replies yet</span>
+          </div>
+          <button class="threadforge-close-btn" onclick="this.parentElement.parentElement.remove(); window.threadForgeInstance?.onCommentClosed('${commentId}')">
+            Close
+          </button>
+        </div>
+      `;
+    }
+    
+    return expansionDiv;
+  }
+
+  private createReplyHTML(reply: CommentData): string {
+    return `
+      <div class="threadforge-reply">
+        <div class="threadforge-reply-header">
+          <span class="threadforge-reply-author">@${reply.author || 'Anonymous'}</span>
+          <span class="threadforge-reply-time">${reply.timestamp || 'Unknown time'}</span>
+        </div>
+        <div class="threadforge-reply-text">
+          ${reply.text || 'No text content'}
+        </div>
+      </div>
+    `;
+  }
+
+  private getErrorHTML(commentId: string): string {
+    return `
+      <div class="threadforge-error-content">
+        <span>❌ Failed to load replies</span>
+        <button class="threadforge-close-btn" onclick="this.parentElement.parentElement.remove(); window.threadForgeInstance?.onCommentClosed('${commentId}')">
+          Close
+        </button>
+      </div>
+    `;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  public onCommentClosed(commentId: string): void {
+    this.expandedComments.delete(commentId);
+  }
+
+  private addCustomStyles(): void {
+    if (document.getElementById('threadforge-styles')) return;
+
+    const style = document.createElement('style');
+    style.id = 'threadforge-styles';
+    style.textContent = `
+      /* ThreadForge Custom Styles */
+      .threadforge-inline-expansion {
+        margin-top: 16px;
+        margin-left: 12px;
+        border-left: 3px solid #1877F2;
+        animation: threadforge-fade-in 0.3s ease-out;
+      }
+
+      @keyframes threadforge-fade-in {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes threadforge-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+
+      .threadforge-loading-content {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 20px;
+        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+        border-radius: 12px;
+        margin: 8px 0;
+        font-size: 14px;
+        color: #495057;
+      }
+
+      .threadforge-spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid #e9ecef;
+        border-top: 2px solid #1877F2;
+        border-radius: 50%;
+        animation: threadforge-spin 1s linear infinite;
+      }
+
+      .threadforge-replies-container {
+        background: linear-gradient(135deg, #ffffff, #f8f9fa);
+        border-radius: 16px;
+        padding: 20px;
+        margin: 8px 0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        border: 1px solid #e9ecef;
+      }
+
+      .threadforge-replies-header {
+        margin-bottom: 16px;
+        padding-bottom: 12px;
+        border-bottom: 2px solid #e9ecef;
+      }
+
+      .threadforge-reply-count {
+        font-weight: 600;
+        color: #1877F2;
+        font-size: 15px;
+      }
+
+      .threadforge-replies-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+
+      .threadforge-reply {
+        background: #ffffff;
+        border-radius: 12px;
+        padding: 16px;
+        border: 1px solid #e9ecef;
+        border-left: 4px solid #1877F2;
+        transition: all 0.2s ease;
+      }
+
+      .threadforge-reply:hover {
+        box-shadow: 0 2px 8px rgba(24, 119, 242, 0.15);
+        transform: translateX(4px);
+      }
+
+      .threadforge-reply-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+
+      .threadforge-reply-author {
+        font-weight: 700;
+        color: #1877F2;
+        font-size: 14px;
+      }
+
+      .threadforge-reply-time {
+        font-size: 12px;
+        color: #6c757d;
+        background: #f8f9fa;
+        padding: 4px 8px;
+        border-radius: 8px;
+      }
+
+      .threadforge-reply-text {
+        color: #212529;
+        line-height: 1.5;
+        font-size: 14px;
+      }
+
+      .threadforge-close-btn {
+        background: linear-gradient(135deg, #6c757d, #495057);
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 25px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        transition: all 0.2s ease;
+        float: right;
+      }
+
+      .threadforge-close-btn:hover {
+        background: linear-gradient(135deg, #495057, #343a40);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(108, 117, 125, 0.3);
+      }
+
+      .threadforge-no-replies {
+        text-align: center;
+        padding: 40px 20px;
+        color: #6c757d;
+        font-style: italic;
+        font-size: 16px;
+      }
+
+      .threadforge-error-content {
+        background: linear-gradient(135deg, #fff5f5, #fed7d7);
+        border: 1px solid #feb2b2;
+        border-radius: 12px;
+        padding: 20px;
+        margin: 8px 0;
+        color: #c53030;
+        text-align: center;
+        font-weight: 600;
+      }
+
+      /* Mobile responsiveness */
+      @media (max-width: 768px) {
+        .threadforge-inline-expansion {
+          margin-left: 8px;
+        }
+        
+        .threadforge-replies-container {
+          padding: 16px;
+        }
+        
+        .threadforge-reply {
+          padding: 12px;
+        }
+        
+        .threadforge-reply-header {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 4px;
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+}
+
+// Initialize the extension
+const threadForgeInstance = new ThreadForgeUIImprover();
+
+// Make it globally accessible for cleanup callbacks
+(window as any).threadForgeInstance = threadForgeInstance;
