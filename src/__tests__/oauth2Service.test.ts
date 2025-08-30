@@ -19,10 +19,15 @@ const mockChromeStorage = {
   },
 };
 
+const mockChromeRuntime = {
+  sendMessage: jest.fn(),
+};
+
 // Setup global mocks
 (global as any).chrome = {
   identity: mockChromeIdentity,
   storage: mockChromeStorage,
+  runtime: mockChromeRuntime,
 };
 
 describe('OAuth2AuthenticationService', () => {
@@ -31,6 +36,7 @@ describe('OAuth2AuthenticationService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockChromeRuntime.sendMessage.mockClear();
     
     mockConfig = {
       clientId: 'test_client_id',
@@ -661,6 +667,355 @@ describe('OAuth2AuthenticationService', () => {
         await authService.scheduleBackgroundRefresh();
 
         expect(mockAlarms.create).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('Enhanced Authentication Status Management', () => {
+    describe('isAuthenticated() convenience method', () => {
+      test('should return true when user is authenticated', async () => {
+        const mockContext: AuthenticationContext = {
+          accessToken: 'access_token_123',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() + 3600000), // 1 hour from now
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...mockContext,
+            expiresAt: mockContext.expiresAt.toISOString()
+          }
+        });
+
+        const isAuthenticated = await authService.isAuthenticated();
+
+        expect(isAuthenticated).toBe(true);
+      });
+
+      test('should return false when user is not authenticated', async () => {
+        mockChromeStorage.sync.get.mockResolvedValue({});
+
+        const isAuthenticated = await authService.isAuthenticated();
+
+        expect(isAuthenticated).toBe(false);
+      });
+
+      test('should return false when token is expired', async () => {
+        const expiredContext: AuthenticationContext = {
+          accessToken: 'access_token_123',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() - 3600000), // 1 hour ago
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...expiredContext,
+            expiresAt: expiredContext.expiresAt.toISOString()
+          }
+        });
+
+        const isAuthenticated = await authService.isAuthenticated();
+
+        expect(isAuthenticated).toBe(false);
+      });
+    });
+
+    describe('Authentication Event Broadcasting', () => {
+      test('should broadcast authentication success event', async () => {
+        const mockEventListener = jest.fn();
+        
+        authService.onAuthenticationChange(mockEventListener);
+
+        const mockRedirectUrl = 'https://test.example.com/callback?code=auth_code_123';
+        mockChromeIdentity.launchWebAuthFlow.mockResolvedValue(mockRedirectUrl);
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({
+            access_token: 'access_token_123',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'refresh_token_123',
+            scope: 'threads_basic'
+          })
+        });
+
+        mockChromeStorage.sync.set.mockResolvedValue(undefined);
+
+        await authService.authenticate();
+
+        expect(mockEventListener).toHaveBeenCalledWith({
+          type: 'AUTHENTICATION_SUCCESS',
+          isAuthenticated: true,
+          userId: expect.any(String),
+          scopes: ['threads_basic']
+        });
+      });
+
+      test('should broadcast authentication failure event', async () => {
+        const mockEventListener = jest.fn();
+        
+        authService.onAuthenticationChange(mockEventListener);
+
+        mockChromeIdentity.launchWebAuthFlow.mockRejectedValue(new Error('User cancelled'));
+
+        await authService.authenticate();
+
+        expect(mockEventListener).toHaveBeenCalledWith({
+          type: 'AUTHENTICATION_FAILED',
+          isAuthenticated: false,
+          error: {
+            code: 'USER_CANCELLED',
+            message: 'Authentication was cancelled by the user'
+          }
+        });
+      });
+
+      test('should broadcast token refresh event', async () => {
+        const mockEventListener = jest.fn();
+        
+        authService.onAuthenticationChange(mockEventListener);
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({
+            access_token: 'new_access_token_456',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new_refresh_token_456',
+            scope: 'threads_basic'
+          })
+        });
+
+        mockChromeStorage.sync.set.mockResolvedValue(undefined);
+
+        await authService.refreshTokens('refresh_token_123');
+
+        expect(mockEventListener).toHaveBeenCalledWith({
+          type: 'TOKEN_REFRESHED',
+          isAuthenticated: true,
+          userId: expect.any(String),
+          scopes: ['threads_basic']
+        });
+      });
+
+      test('should broadcast sign out event', async () => {
+        const mockEventListener = jest.fn();
+        
+        authService.onAuthenticationChange(mockEventListener);
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ success: true })
+        });
+
+        mockChromeStorage.sync.remove.mockResolvedValue(undefined);
+
+        await authService.revokeAccess('access_token_123');
+
+        expect(mockEventListener).toHaveBeenCalledWith({
+          type: 'SIGNED_OUT',
+          isAuthenticated: false
+        });
+      });
+    });
+
+    describe('Authentication Retry Logic', () => {
+      test('should retry authentication on network failure with exponential backoff', async () => {
+        const mockRedirectUrl = 'https://test.example.com/callback?code=auth_code_123';
+        mockChromeIdentity.launchWebAuthFlow.mockResolvedValue(mockRedirectUrl);
+
+        // First call fails with network error, second succeeds
+        global.fetch = jest.fn()
+          .mockRejectedValueOnce(new Error('Network error'))
+          .mockResolvedValueOnce({
+            ok: true,
+            json: () => Promise.resolve({
+              access_token: 'access_token_123',
+              token_type: 'Bearer',
+              expires_in: 3600,
+              refresh_token: 'refresh_token_123',
+              scope: 'threads_basic'
+            })
+          });
+
+        mockChromeStorage.sync.set.mockResolvedValue(undefined);
+
+        const result = await authService.authenticateWithRetry({
+          maxRetries: 2,
+          initialDelayMs: 100
+        });
+
+        expect(result.success).toBe(true);
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+        expect(result.context).toBeDefined();
+        expect(result.context!.accessToken).toBe('access_token_123');
+      });
+
+      test('should fail after maximum retry attempts', async () => {
+        const mockRedirectUrl = 'https://test.example.com/callback?code=auth_code_123';
+        mockChromeIdentity.launchWebAuthFlow.mockResolvedValue(mockRedirectUrl);
+
+        global.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
+
+        const result = await authService.authenticateWithRetry({
+          maxRetries: 2,
+          initialDelayMs: 100
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBeDefined();
+        expect(result.error!.code).toBe('MAX_RETRIES_EXCEEDED');
+        expect(result.error!.message).toBe('Authentication failed after 2 retry attempts');
+      });
+
+      test('should not retry on user cancellation', async () => {
+        mockChromeIdentity.launchWebAuthFlow.mockRejectedValue(new Error('User cancelled'));
+
+        const result = await authService.authenticateWithRetry({
+          maxRetries: 3,
+          initialDelayMs: 100
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.error!.code).toBe('USER_CANCELLED');
+        expect(mockChromeIdentity.launchWebAuthFlow).toHaveBeenCalledTimes(1); // No retries
+      });
+
+      test('should use exponential backoff with jitter', async () => {
+        const mockRedirectUrl = 'https://test.example.com/callback?code=auth_code_123';
+        mockChromeIdentity.launchWebAuthFlow.mockResolvedValue(mockRedirectUrl);
+
+        global.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
+
+        const startTime = Date.now();
+        await authService.authenticateWithRetry({
+          maxRetries: 2,
+          initialDelayMs: 100
+        });
+        const endTime = Date.now();
+
+        // Should take at least 100ms + 200ms for two retries
+        expect(endTime - startTime).toBeGreaterThan(250);
+      });
+    });
+
+    describe('Enhanced Error Handling', () => {
+      test('should provide user-friendly error messages for common scenarios', () => {
+        expect(authService.getErrorMessage('USER_CANCELLED')).toBe(
+          'Authentication was cancelled. Please try again when ready to connect your account.'
+        );
+
+        expect(authService.getErrorMessage('NETWORK_ERROR')).toBe(
+          'Unable to connect to Threads. Please check your internet connection and try again.'
+        );
+
+        expect(authService.getErrorMessage('INVALID_GRANT')).toBe(
+          'Your authentication session has expired. Please sign in again.'
+        );
+
+        expect(authService.getErrorMessage('INVALID_CLIENT')).toBe(
+          'There\'s an issue with the app configuration. Please contact support.'
+        );
+
+        expect(authService.getErrorMessage('UNKNOWN_ERROR')).toBe(
+          'An unexpected error occurred. Please try again or contact support if the problem persists.'
+        );
+      });
+
+      test('should categorize errors by severity', () => {
+        expect(authService.getErrorSeverity('USER_CANCELLED')).toBe('info');
+        expect(authService.getErrorSeverity('NETWORK_ERROR')).toBe('warning');
+        expect(authService.getErrorSeverity('INVALID_GRANT')).toBe('error');
+        expect(authService.getErrorSeverity('INVALID_CLIENT')).toBe('error');
+        expect(authService.getErrorSeverity('UNKNOWN_ERROR')).toBe('error');
+      });
+
+      test('should provide recovery suggestions for different error types', () => {
+        expect(authService.getRecoverySuggestion('USER_CANCELLED')).toBe(
+          'Click the "Connect Account" button when you\'re ready to authenticate.'
+        );
+
+        expect(authService.getRecoverySuggestion('NETWORK_ERROR')).toBe(
+          'Check your internet connection and try again in a moment.'
+        );
+
+        expect(authService.getRecoverySuggestion('INVALID_GRANT')).toBe(
+          'Please sign out and sign in again to refresh your authentication.'
+        );
+
+        expect(authService.getRecoverySuggestion('INVALID_CLIENT')).toBe(
+          'Please update the extension or contact support for assistance.'
+        );
+      });
+    });
+
+    describe('Authentication State Monitoring', () => {
+      test('should start monitoring authentication status changes', async () => {
+        const mockMonitorCallback = jest.fn();
+        
+        await authService.startAuthenticationMonitoring(mockMonitorCallback);
+        
+        // Verify that monitoring is active
+        expect(authService.isMonitoring()).toBe(true);
+      });
+
+      test('should stop monitoring authentication status changes', async () => {
+        const mockMonitorCallback = jest.fn();
+        
+        await authService.startAuthenticationMonitoring(mockMonitorCallback);
+        expect(authService.isMonitoring()).toBe(true);
+        
+        authService.stopAuthenticationMonitoring();
+        expect(authService.isMonitoring()).toBe(false);
+      });
+
+      test('should detect token expiration and trigger refresh', async () => {
+        const mockMonitorCallback = jest.fn();
+        const nearExpirationContext: AuthenticationContext = {
+          accessToken: 'access_token_123',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() + 300000), // 5 minutes from now
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...nearExpirationContext,
+            expiresAt: nearExpirationContext.expiresAt.toISOString()
+          }
+        });
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({
+            access_token: 'new_access_token_456',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new_refresh_token_456',
+            scope: 'threads_basic'
+          })
+        });
+
+        mockChromeStorage.sync.set.mockResolvedValue(undefined);
+
+        await authService.startAuthenticationMonitoring(mockMonitorCallback);
+
+        // Trigger monitoring check
+        await authService.checkAuthenticationStatus();
+
+        expect(mockMonitorCallback).toHaveBeenCalledWith({
+          type: 'TOKEN_REFRESH_NEEDED',
+          isAuthenticated: true,
+          userId: 'user_123',
+          scopes: ['threads_basic'],
+          needsRefresh: true
+        });
       });
     });
   });

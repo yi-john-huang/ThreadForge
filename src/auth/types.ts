@@ -50,3 +50,26 @@ export interface AuthenticationStatus {
   expiresAt?: Date;
   needsRefresh: boolean;
 }
+
+export interface AuthenticationEvent {
+  type: 'AUTHENTICATION_SUCCESS' | 'AUTHENTICATION_FAILED' | 'TOKEN_REFRESHED' | 'SIGNED_OUT' | 'TOKEN_REFRESH_NEEDED';
+  isAuthenticated: boolean;
+  userId?: string;
+  scopes?: string[];
+  needsRefresh?: boolean;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface RetryConfig {
+  maxRetries: number;
+  initialDelayMs: number;
+  backoffMultiplier?: number;
+  maxDelayMs?: number;
+}
+
+export type AuthenticationEventListener = (event: AuthenticationEvent) => void;
+
+export type ErrorSeverity = 'info' | 'warning' | 'error';

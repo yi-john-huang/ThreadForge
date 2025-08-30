@@ -9,13 +9,20 @@ import {
   OAuth2Config, 
   AuthenticationResult, 
   AuthenticationStatus,
-  TokenRefreshResponse
+  TokenRefreshResponse,
+  AuthenticationEvent,
+  AuthenticationEventListener,
+  RetryConfig,
+  ErrorSeverity
 } from './types';
 
 export class OAuth2AuthenticationService {
   private config: OAuth2Config;
   private readonly STORAGE_KEY = 'threadforge_auth_context';
   private readonly TOKEN_REFRESH_BUFFER_MS = 10 * 60 * 1000; // 10 minutes
+  private eventListeners: AuthenticationEventListener[] = [];
+  private monitoringActive = false;
+  private monitoringInterval?: number;
 
   constructor(config: OAuth2Config) {
     this.validateConfig(config);
@@ -37,33 +44,6 @@ export class OAuth2AuthenticationService {
     }
   }
 
-  /**
-   * Start OAuth2 authentication flow using Chrome Identity API
-   * Requirements: 2.1 (OAuth2 flow)
-   */
-  async authenticate(): Promise<AuthenticationResult> {
-    try {
-      // Step 1: Launch OAuth2 web auth flow
-      const authCode = await this.launchAuthFlow();
-      
-      // Step 2: Exchange authorization code for tokens
-      const tokenResponse = await this.exchangeCodeForTokens(authCode);
-      
-      // Step 3: Create authentication context
-      const context = this.createAuthContext(tokenResponse);
-      
-      // Step 4: Store authentication context
-      await this.storeAuthContext(context);
-      
-      return {
-        success: true,
-        context
-      };
-      
-    } catch (error) {
-      return this.handleAuthError(error);
-    }
-  }
 
   /**
    * Launch Chrome Identity web auth flow
@@ -296,29 +276,6 @@ export class OAuth2AuthenticationService {
     };
   }
 
-  /**
-   * Refresh access token using refresh token
-   * Requirements: 2.3 (token refresh), 2.4 (lifecycle management)
-   */
-  async refreshTokens(refreshToken: string): Promise<AuthenticationResult> {
-    if (!refreshToken || refreshToken.trim() === '') {
-      throw new Error('Refresh token is required');
-    }
-
-    try {
-      const tokenResponse = await this.exchangeRefreshTokenForTokens(refreshToken);
-      const context = this.createAuthContext(tokenResponse);
-      await this.storeAuthContext(context);
-      
-      return {
-        success: true,
-        context
-      };
-      
-    } catch (error) {
-      return this.handleRefreshError(error);
-    }
-  }
 
   /**
    * Exchange refresh token for new access tokens
@@ -397,45 +354,6 @@ export class OAuth2AuthenticationService {
     return timeUntilExpiry <= buffer;
   }
 
-  /**
-   * Revoke access token and clear stored authentication
-   * Requirements: 2.4 (sign-out)
-   */
-  async revokeAccess(accessToken?: string): Promise<AuthenticationResult> {
-    try {
-      let tokenToRevoke = accessToken;
-      
-      // If no token provided, get it from stored context
-      if (!tokenToRevoke) {
-        const context = await this.getStoredAuthContext();
-        if (context) {
-          tokenToRevoke = context.accessToken;
-        }
-      }
-
-      // Always clear local storage first
-      await this.clearStoredAuthContext();
-
-      // Try to revoke on server (but don't fail if it doesn't work)
-      if (tokenToRevoke) {
-        try {
-          await this.revokeTokenOnServer(tokenToRevoke);
-        } catch (error) {
-          console.warn('Failed to revoke token on server, but local storage cleared:', error);
-        }
-      }
-
-      return {
-        success: true
-      };
-      
-    } catch (error) {
-      console.error('Error during revoke access:', error);
-      return {
-        success: true // Still consider it successful if local storage is cleared
-      };
-    }
-  }
 
   /**
    * Revoke token on the server
@@ -484,6 +402,396 @@ export class OAuth2AuthenticationService {
       
     } catch (error) {
       console.error('Error scheduling background refresh:', error);
+    }
+  }
+
+  /**
+   * Convenience method to check if user is authenticated
+   * Requirements: 2.4 (authentication status)
+   */
+  async isAuthenticated(): Promise<boolean> {
+    const status = await this.getAuthStatus();
+    return status.isAuthenticated;
+  }
+
+  /**
+   * Add event listener for authentication changes
+   * Requirements: 2.4 (event broadcasting)
+   */
+  onAuthenticationChange(listener: AuthenticationEventListener): void {
+    this.eventListeners.push(listener);
+  }
+
+  /**
+   * Remove event listener for authentication changes
+   */
+  removeAuthenticationListener(listener: AuthenticationEventListener): void {
+    const index = this.eventListeners.indexOf(listener);
+    if (index > -1) {
+      this.eventListeners.splice(index, 1);
+    }
+  }
+
+  /**
+   * Broadcast authentication event to all listeners
+   */
+  private broadcastAuthenticationEvent(event: AuthenticationEvent): void {
+    this.eventListeners.forEach(listener => {
+      try {
+        listener(event);
+      } catch (error) {
+        console.error('Error in authentication event listener:', error);
+      }
+    });
+
+    // Also send to other extension components via chrome.runtime
+    try {
+      chrome.runtime.sendMessage({
+        type: 'AUTHENTICATION_EVENT',
+        payload: event
+      });
+    } catch (error) {
+      // Chrome runtime may not be available in tests
+      console.debug('Could not send authentication event via chrome.runtime:', error);
+    }
+  }
+
+  /**
+   * Authenticate with retry logic and exponential backoff
+   * Requirements: 5.1 (retry logic)
+   */
+  async authenticateWithRetry(config: RetryConfig): Promise<AuthenticationResult> {
+    const { maxRetries, initialDelayMs, backoffMultiplier = 2, maxDelayMs = 30000 } = config;
+    let lastError: any;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await this.authenticate();
+        
+        if (result.success) {
+          // Broadcast success event
+          if (result.context) {
+            this.broadcastAuthenticationEvent({
+              type: 'AUTHENTICATION_SUCCESS',
+              isAuthenticated: true,
+              userId: result.context.userId,
+              scopes: result.context.scopes
+            });
+          }
+          return result;
+        }
+        
+        lastError = result.error;
+        
+        // Don't retry on user cancellation or client errors
+        if (result.error?.code === 'USER_CANCELLED' || 
+            result.error?.code === 'INVALID_CLIENT') {
+          this.broadcastAuthenticationEvent({
+            type: 'AUTHENTICATION_FAILED',
+            isAuthenticated: false,
+            error: result.error
+          });
+          return result;
+        }
+        
+      } catch (error) {
+        lastError = error;
+        
+        // Don't retry on user cancellation
+        if (error instanceof Error && error.message === 'USER_CANCELLED') {
+          break;
+        }
+      }
+
+      // Wait before retry (except on last attempt)
+      if (attempt < maxRetries) {
+        const delay = Math.min(
+          initialDelayMs * Math.pow(backoffMultiplier, attempt),
+          maxDelayMs
+        );
+        
+        // Add jitter (±25%)
+        const jitter = delay * 0.25 * (Math.random() - 0.5);
+        const delayWithJitter = Math.max(0, delay + jitter);
+        
+        await this.sleep(delayWithJitter);
+      }
+    }
+
+    // All retries failed
+    const finalResult: AuthenticationResult = {
+      success: false,
+      error: {
+        code: 'MAX_RETRIES_EXCEEDED',
+        message: `Authentication failed after ${maxRetries} retry attempts`
+      }
+    };
+
+    // Broadcast failure event
+    this.broadcastAuthenticationEvent({
+      type: 'AUTHENTICATION_FAILED',
+      isAuthenticated: false,
+      error: finalResult.error
+    });
+
+    return finalResult;
+  }
+
+  /**
+   * Sleep utility for retry delays
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Get user-friendly error message for error code
+   * Requirements: 5.1 (user-friendly messages)
+   */
+  getErrorMessage(errorCode: string): string {
+    const errorMessages: Record<string, string> = {
+      'USER_CANCELLED': 'Authentication was cancelled. Please try again when ready to connect your account.',
+      'NETWORK_ERROR': 'Unable to connect to Threads. Please check your internet connection and try again.',
+      'INVALID_GRANT': 'Your authentication session has expired. Please sign in again.',
+      'INVALID_CLIENT': 'There\'s an issue with the app configuration. Please contact support.',
+      'INVALID_TOKEN': 'Your authentication token is invalid. Please sign in again.',
+      'INSUFFICIENT_SCOPE': 'Additional permissions are required. Please re-authenticate to grant access.',
+      'RATE_LIMITED': 'Too many authentication attempts. Please wait a moment and try again.',
+      'SERVER_ERROR': 'Threads authentication service is temporarily unavailable. Please try again later.',
+      'UNKNOWN_ERROR': 'An unexpected error occurred. Please try again or contact support if the problem persists.'
+    };
+
+    return errorMessages[errorCode] || errorMessages['UNKNOWN_ERROR'];
+  }
+
+  /**
+   * Get error severity level
+   * Requirements: 5.1 (error categorization)
+   */
+  getErrorSeverity(errorCode: string): ErrorSeverity {
+    const severityMap: Record<string, ErrorSeverity> = {
+      'USER_CANCELLED': 'info',
+      'NETWORK_ERROR': 'warning',
+      'RATE_LIMITED': 'warning',
+      'INVALID_GRANT': 'error',
+      'INVALID_CLIENT': 'error',
+      'INVALID_TOKEN': 'error',
+      'INSUFFICIENT_SCOPE': 'error',
+      'SERVER_ERROR': 'error',
+      'UNKNOWN_ERROR': 'error'
+    };
+
+    return severityMap[errorCode] || 'error';
+  }
+
+  /**
+   * Get recovery suggestion for error code
+   * Requirements: 5.1 (recovery guidance)
+   */
+  getRecoverySuggestion(errorCode: string): string {
+    const suggestions: Record<string, string> = {
+      'USER_CANCELLED': 'Click the "Connect Account" button when you\'re ready to authenticate.',
+      'NETWORK_ERROR': 'Check your internet connection and try again in a moment.',
+      'INVALID_GRANT': 'Please sign out and sign in again to refresh your authentication.',
+      'INVALID_CLIENT': 'Please update the extension or contact support for assistance.',
+      'INVALID_TOKEN': 'Sign out and sign back in to get a fresh authentication token.',
+      'INSUFFICIENT_SCOPE': 'Re-authenticate to grant the required permissions for full functionality.',
+      'RATE_LIMITED': 'Wait a few minutes before attempting to authenticate again.',
+      'SERVER_ERROR': 'The issue is on Threads\' side. Try again in a few minutes.',
+      'UNKNOWN_ERROR': 'Try refreshing the page and attempting the action again.'
+    };
+
+    return suggestions[errorCode] || suggestions['UNKNOWN_ERROR'];
+  }
+
+  /**
+   * Start monitoring authentication status changes
+   * Requirements: 2.4 (status monitoring)
+   */
+  async startAuthenticationMonitoring(callback: AuthenticationEventListener): Promise<void> {
+    if (this.monitoringActive) {
+      return; // Already monitoring
+    }
+
+    this.onAuthenticationChange(callback);
+    this.monitoringActive = true;
+
+    // Check status immediately
+    await this.checkAuthenticationStatus();
+
+    // Set up periodic monitoring (every 5 minutes)
+    this.monitoringInterval = window.setInterval(async () => {
+      await this.checkAuthenticationStatus();
+    }, 5 * 60 * 1000);
+
+    console.log('Authentication monitoring started');
+  }
+
+  /**
+   * Stop monitoring authentication status changes
+   */
+  stopAuthenticationMonitoring(): void {
+    this.monitoringActive = false;
+    
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+      this.monitoringInterval = undefined;
+    }
+
+    console.log('Authentication monitoring stopped');
+  }
+
+  /**
+   * Check if monitoring is active
+   */
+  isMonitoring(): boolean {
+    return this.monitoringActive;
+  }
+
+  /**
+   * Check current authentication status and broadcast events if needed
+   */
+  async checkAuthenticationStatus(): Promise<void> {
+    try {
+      const status = await this.getAuthStatus();
+
+      if (status.isAuthenticated && status.needsRefresh) {
+        this.broadcastAuthenticationEvent({
+          type: 'TOKEN_REFRESH_NEEDED',
+          isAuthenticated: true,
+          userId: status.userId,
+          scopes: status.scopes,
+          needsRefresh: true
+        });
+      }
+    } catch (error) {
+      console.error('Error checking authentication status:', error);
+    }
+  }
+
+  /**
+   * Enhanced authenticate method with event broadcasting
+   */
+  async authenticate(): Promise<AuthenticationResult> {
+    try {
+      // Step 1: Launch OAuth2 web auth flow
+      const authCode = await this.launchAuthFlow();
+      
+      // Step 2: Exchange authorization code for tokens
+      const tokenResponse = await this.exchangeCodeForTokens(authCode);
+      
+      // Step 3: Create authentication context
+      const context = this.createAuthContext(tokenResponse);
+      
+      // Step 4: Store authentication context
+      await this.storeAuthContext(context);
+      
+      const result: AuthenticationResult = {
+        success: true,
+        context
+      };
+
+      // Broadcast success event
+      this.broadcastAuthenticationEvent({
+        type: 'AUTHENTICATION_SUCCESS',
+        isAuthenticated: true,
+        userId: context.userId,
+        scopes: context.scopes
+      });
+      
+      return result;
+      
+    } catch (error) {
+      const result = this.handleAuthError(error);
+      
+      // Broadcast failure event
+      this.broadcastAuthenticationEvent({
+        type: 'AUTHENTICATION_FAILED',
+        isAuthenticated: false,
+        error: result.error
+      });
+      
+      return result;
+    }
+  }
+
+  /**
+   * Enhanced refreshTokens method with event broadcasting
+   */
+  async refreshTokens(refreshToken: string): Promise<AuthenticationResult> {
+    if (!refreshToken || refreshToken.trim() === '') {
+      throw new Error('Refresh token is required');
+    }
+
+    try {
+      const tokenResponse = await this.exchangeRefreshTokenForTokens(refreshToken);
+      const context = this.createAuthContext(tokenResponse);
+      await this.storeAuthContext(context);
+      
+      const result: AuthenticationResult = {
+        success: true,
+        context
+      };
+
+      // Broadcast token refresh event
+      this.broadcastAuthenticationEvent({
+        type: 'TOKEN_REFRESHED',
+        isAuthenticated: true,
+        userId: context.userId,
+        scopes: context.scopes
+      });
+      
+      return result;
+      
+    } catch (error) {
+      return this.handleRefreshError(error);
+    }
+  }
+
+  /**
+   * Enhanced revokeAccess method with event broadcasting
+   */
+  async revokeAccess(accessToken?: string): Promise<AuthenticationResult> {
+    try {
+      let tokenToRevoke = accessToken;
+      
+      // If no token provided, get it from stored context
+      if (!tokenToRevoke) {
+        const context = await this.getStoredAuthContext();
+        if (context) {
+          tokenToRevoke = context.accessToken;
+        }
+      }
+
+      // Always clear local storage first
+      await this.clearStoredAuthContext();
+
+      // Try to revoke on server (but don't fail if it doesn't work)
+      if (tokenToRevoke) {
+        try {
+          await this.revokeTokenOnServer(tokenToRevoke);
+        } catch (error) {
+          console.warn('Failed to revoke token on server, but local storage cleared:', error);
+        }
+      }
+
+      const result: AuthenticationResult = {
+        success: true
+      };
+
+      // Broadcast sign out event
+      this.broadcastAuthenticationEvent({
+        type: 'SIGNED_OUT',
+        isAuthenticated: false
+      });
+
+      return result;
+      
+    } catch (error) {
+      console.error('Error during revoke access:', error);
+      return {
+        success: true // Still consider it successful if local storage is cleared
+      };
     }
   }
 
