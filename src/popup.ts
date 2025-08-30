@@ -6,9 +6,12 @@ interface PopupElements {
   statusDescription: HTMLElement;
   enableInlineToggle: HTMLElement;
   autoExpandToggle: HTMLElement;
+  debugToggle: HTMLElement;
   refreshButton: HTMLButtonElement;
   expandedCount: HTMLElement;
   interceptedCount: HTMLElement;
+  lastReplySource: HTMLElement;
+  debugInfo: HTMLElement;
 }
 
 class PopupController {
@@ -16,7 +19,8 @@ class PopupController {
   private settings: ExtensionSettings = {
     enableInlineExpansion: true,
     autoExpandReplies: false,
-    maxReplyDepth: 3
+    maxReplyDepth: 3,
+    debug: false,
   };
 
   constructor() {
@@ -50,9 +54,12 @@ class PopupController {
       statusDescription: document.getElementById('statusDescription')!,
       enableInlineToggle: document.getElementById('enableInlineToggle')!,
       autoExpandToggle: document.getElementById('autoExpandToggle')!,
+      debugToggle: document.getElementById('debugToggle')!,
       refreshButton: document.getElementById('refreshButton') as HTMLButtonElement,
       expandedCount: document.getElementById('expandedCount')!,
-      interceptedCount: document.getElementById('interceptedCount')!
+      interceptedCount: document.getElementById('interceptedCount')!,
+      lastReplySource: document.getElementById('lastReplySource')!,
+      debugInfo: document.getElementById('debugInfo')!,
     };
   }
 
@@ -66,6 +73,12 @@ class PopupController {
 
     this.elements.autoExpandToggle.addEventListener('click', () => {
       this.settings.autoExpandReplies = !this.settings.autoExpandReplies;
+      this.saveSettings();
+      this.updateUI();
+    });
+
+    this.elements.debugToggle.addEventListener('click', () => {
+      this.settings.debug = !this.settings.debug;
       this.saveSettings();
       this.updateUI();
     });
@@ -128,14 +141,16 @@ class PopupController {
 
   private async loadStats(): Promise<void> {
     try {
-      const result = await chrome.storage.local.get(['expandedCount', 'interceptedCount']);
+      const result = await chrome.storage.local.get(['expandedCount', 'interceptedCount', 'lastReplySource']);
       
       this.elements.expandedCount.textContent = (result.expandedCount || 0).toString();
       this.elements.interceptedCount.textContent = (result.interceptedCount || 0).toString();
+      this.elements.lastReplySource.textContent = result.lastReplySource || 'n/a';
     } catch (error) {
       console.warn('Failed to load stats:', error);
       this.elements.expandedCount.textContent = '0';
       this.elements.interceptedCount.textContent = '0';
+      this.elements.lastReplySource.textContent = 'n/a';
     }
   }
 
@@ -143,10 +158,14 @@ class PopupController {
     // Update toggle states
     this.elements.enableInlineToggle.classList.toggle('active', this.settings.enableInlineExpansion);
     this.elements.autoExpandToggle.classList.toggle('active', this.settings.autoExpandReplies);
+    this.elements.debugToggle.classList.toggle('active', !!this.settings.debug);
     
     // Disable auto-expand toggle if inline expansion is disabled
     this.elements.autoExpandToggle.style.opacity = this.settings.enableInlineExpansion ? '1' : '0.5';
     this.elements.autoExpandToggle.style.pointerEvents = this.settings.enableInlineExpansion ? 'auto' : 'none';
+
+    // Show debug info footer when enabled
+    this.elements.debugInfo.style.display = this.settings.debug ? 'block' : 'none';
   }
 
   private async refreshCurrentTab(): Promise<void> {

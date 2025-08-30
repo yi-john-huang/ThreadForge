@@ -46,6 +46,9 @@ A Chrome extension that improves the Threads experience by enabling **inline com
 - `npm run build` - Build the extension for production
 - `npm run dev` - Build and watch for changes during development
 - `npm run type-check` - Check TypeScript types without building
+- `npm test` - Run Jest unit tests (jsdom)
+- `npm run test:watch` - Watch mode for tests
+- `npm run test:coverage` - Generate coverage report
 
 ### Project Structure
 
@@ -99,6 +102,15 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 4. Commit your changes: `git commit -m 'Add amazing feature'`
 5. Push to the branch: `git push origin feature/amazing-feature`
 6. Open a Pull Request
+
+### Contributor Checklist
+
+- Run `npm run type-check` and fix any errors.
+- Build locally with `npm run build` and test the `dist/` build in Chrome via Load unpacked.
+- Keep `manifest.json` permissions minimal; explain any changes.
+- If UI changes (popup or inline UI), include screenshots/GIFs.
+- Use Conventional Commits (e.g., `feat:`, `fix:`, `docs:`) and clear PR descriptions with linked issues.
+- See AGENTS.md for coding style, project structure, and PR guidelines.
 
 ## 📝 License
 

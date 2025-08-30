@@ -18,7 +18,7 @@
   - Write TypeScript compiler tests to validate type definitions
   - _Requirements: All requirements need foundational type safety_
 
-- [ ] 3. Set up background service worker architecture
+- [x] 3. Set up background service worker architecture
   - Create src/background/index.ts with service worker event listeners
   - Implement message passing handler for content script communication
   - Create background/messageRouter.ts for routing messages to appropriate services
@@ -28,7 +28,7 @@
 
 ## Authentication System Implementation
 
-- [ ] 4. Implement OAuth2 authentication service foundation
+- [x ] 4. Implement OAuth2 authentication service foundation
   - Create src/auth/oauth2Service.ts with OAuth2AuthenticationService class
   - Implement authenticate() method using chrome.identity.launchWebAuthFlow
   - Create token storage methods using chrome.storage.sync
@@ -36,7 +36,7 @@
   - Write unit tests for OAuth2 flow and token management
   - _Requirements: 2.1, 2.2, 2.5_
 
-- [ ] 5. Add token refresh and lifecycle management
+- [x] 5. Add token refresh and lifecycle management
   - Implement refreshTokens() method with automatic refresh logic
   - Add token expiration checking with configurable buffer time
   - Create revokeAccess() method for user sign-out

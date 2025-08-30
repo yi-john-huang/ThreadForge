@@ -1,4 +1,10 @@
 import { CommentData, ClickInterceptionResult, CommentExtractorOptions } from './types';
+import {
+  extractRepliesFromDOM as parseRepliesFromDOM,
+  extractRepliesFromCurrentPage as parseRepliesFromCurrentPage,
+  extractSingleReply as parseSingleReply,
+  extractRepliesFromEmbeddedJSON as parseRepliesFromEmbeddedJSON,
+} from './utils/extractors';
 
 console.log('🧵 ThreadForge UI Improver loaded!');
 
@@ -6,7 +12,8 @@ class ThreadForgeUIImprover {
   private settings = {
     enableInlineExpansion: true,
     autoExpandReplies: false,
-    maxReplyDepth: 3
+    maxReplyDepth: 3,
+    debug: false
   };
 
   private expandedComments = new Set<string>();
@@ -72,11 +79,20 @@ class ThreadForgeUIImprover {
   }
 
   private processNewContent(container: Element): void {
-    // Find comment containers in new content
-    const commentElements = container.querySelectorAll('div[data-pressable-container="true"]');
+    // Find all potential comment containers
+    const selectors = [
+      'div[data-pressable-container="true"]',
+      'article',
+      '[role="article"]',
+      'div[class*="reply"]',
+      'div[class*="comment"]'
+    ];
     
-    commentElements.forEach((element) => {
-      this.markPotentiallyExpandableComment(element as HTMLElement);
+    selectors.forEach(selector => {
+      const elements = container.querySelectorAll(selector);
+      elements.forEach((element) => {
+        this.markPotentiallyExpandableComment(element as HTMLElement);
+      });
     });
   }
 
@@ -97,6 +113,8 @@ class ThreadForgeUIImprover {
     if (result.intercepted && result.commentUrl && result.element) {
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
+      this.incrementStat('interceptedCount');
       this.expandCommentInline(result.element, result.commentUrl);
     }
   }
@@ -105,9 +123,10 @@ class ThreadForgeUIImprover {
     const target = event.target as Element;
     if (!target) return { intercepted: false };
 
-    // Find the closest comment container
-    const commentContainer = target.closest('div[data-threadforge-expandable="true"]') as HTMLElement;
-    if (!commentContainer) return { intercepted: false };
+    // Ignore clicks inside ThreadForge UI elements
+    if (target.closest('.threadforge-inline-expansion') || target.closest('.threadforge-close-btn')) {
+      return { intercepted: false };
+    }
 
     // Check if the click is on a link that would navigate to a comment page
     const clickedLink = target.closest('a[href]') as HTMLAnchorElement;
@@ -117,6 +136,19 @@ class ThreadForgeUIImprover {
     const isCommentNavigation = this.isCommentNavigationLink(clickedLink.href);
     
     if (isCommentNavigation) {
+      // Find the container for this specific click
+      let commentContainer = clickedLink.closest('div[data-pressable-container="true"]') as HTMLElement;
+      
+      // If not found, try to find any parent container that looks like a comment
+      if (!commentContainer) {
+        commentContainer = clickedLink.closest('article, [role="article"], div[class*="reply"], div[class*="comment"]') as HTMLElement;
+      }
+      
+      // If still not found, use the link's parent container
+      if (!commentContainer) {
+        commentContainer = clickedLink.parentElement as HTMLElement;
+      }
+      
       console.log('🔗 Intercepting comment click for inline expansion:', clickedLink.href);
       return {
         intercepted: true,
@@ -129,7 +161,7 @@ class ThreadForgeUIImprover {
   }
 
   private isCommentNavigationLink(href: string): boolean {
-    return href.includes('threads.com') && 
+    return (href.includes('threads.com') || href.includes('threads.net')) && 
            href.includes('/post/') &&
            !href.includes('photo/') &&
            !href.includes('video/') &&
@@ -161,6 +193,7 @@ class ThreadForgeUIImprover {
       // Create and show expansion
       const expansionDiv = this.createExpansionElement(commentData, commentId);
       commentContainer.appendChild(expansionDiv);
+      this.incrementStat('expandedCount');
       
       // Scroll into view
       expansionDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -168,11 +201,20 @@ class ThreadForgeUIImprover {
     } catch (error) {
       console.error('❌ Error expanding comment:', error);
       loadingDiv.innerHTML = this.getErrorHTML(commentId);
+      const closeBtn = loadingDiv.querySelector('.threadforge-close-btn') as HTMLButtonElement | null;
+      if (closeBtn) {
+        closeBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          loadingDiv.remove();
+          this.onCommentClosed(commentId);
+        });
+      }
     }
   }
 
   private getCommentId(element: HTMLElement): string {
-    return `comment-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    return `comment-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
   }
 
   private createLoadingElement(): HTMLElement {
@@ -188,34 +230,313 @@ class ThreadForgeUIImprover {
   }
 
   private async fetchCommentData(url: string): Promise<CommentData[]> {
-    // In a real implementation, this would fetch the actual comment page
-    // For now, we'll simulate with mock data
-    await this.sleep(1500);
-    
-    const mockReplies: CommentData[] = [
-      {
-        id: '1',
-        author: 'alice_dev',
-        text: 'Really interesting perspective! I\'ve been thinking about this too.',
-        timestamp: '2 hours ago'
-      },
-      {
-        id: '2', 
-        author: 'bob_coder',
-        text: 'Thanks for sharing this. The integration with Claude Code looks promising!',
-        timestamp: '1 hour ago'
-      },
-      {
-        id: '3',
-        author: 'charlie_tech',
-        text: 'I wonder how this compares to VSCode\'s implementation. Any thoughts?',
-        timestamp: '30 minutes ago'
+    try {
+      console.log('🔍 Fetching comment data from:', url);
+      
+      // First, check if we need to navigate to the comment page
+      const currentUrl = window.location.href;
+      const needsNavigation = !currentUrl.includes(url.split('/post/')[1]?.split('?')[0] || '');
+      
+      if (needsNavigation) {
+        console.log('🚀 Navigating to comment page...');
+        // Open in new tab to fetch comments
+        const comments = await this.fetchCommentsInNewTab(url);
+        if (comments.length > 0) {
+          chrome.storage.local.set({ lastReplySource: 'new-tab' });
+          return comments;
+        }
+      } else {
+        // We're already on the comment page, wait for comments to load
+        console.log('🕰️ Waiting for comments to load on current page...');
+        const comments = await this.waitForCommentsToLoad();
+        if (comments.length > 0) {
+          chrome.storage.local.set({ lastReplySource: 'current-page-wait' });
+          return comments;
+        }
       }
+      
+    } catch (error) {
+      console.error('❌ Error fetching comment data:', error);
+    }
+    
+    // If all else fails, return empty array
+    console.log('😔 No replies found');
+    chrome.storage.local.set({ lastReplySource: 'none' });
+    return [];
+  }
+
+  private extractRepliesFromDOM(doc: Document): CommentData[] {
+    return parseRepliesFromDOM(doc);
+  }
+  
+  private async extractAllRepliesFromPage(doc: Document, pageUrl: string): Promise<CommentData[]> {
+    const allReplies: CommentData[] = [];
+    
+    // Log page structure for debugging
+    console.log('🔍 Analyzing page structure...');
+    
+    // Look for the main content area
+    const mainContent = doc.querySelector('[role="main"]') || doc.querySelector('main') || doc.body;
+    
+    // Try multiple strategies to find comments
+    // Strategy 1: Look for comment sections by class patterns
+    const commentSections = mainContent.querySelectorAll('[class*="reply"], [class*="comment"], [class*="response"]');
+    console.log(`Found ${commentSections.length} potential comment sections`);
+    
+    // Strategy 2: Look for articles after the main post
+    const articles = Array.from(mainContent.querySelectorAll('article'));
+    let isAfterMainPost = false;
+    
+    for (const article of articles) {
+      // Check if this is the main post (usually has more content, images, etc.)
+      const hasImages = article.querySelectorAll('img').length > 1;
+      const textLength = article.textContent?.length || 0;
+      
+      if (!isAfterMainPost && (hasImages || textLength > 500)) {
+        isAfterMainPost = true;
+        console.log('Found main post, looking for replies after this...');
+        continue;
+      }
+      
+      if (isAfterMainPost) {
+        const reply = this.extractSingleReply(article as HTMLElement);
+        if (reply && reply.text && reply.text.length > 10) {
+          allReplies.push(reply);
+        }
+      }
+    }
+    
+    // Strategy 3: Look for specific Threads patterns
+    const threadPatterns = [
+      'div[data-pressable-container="true"]',
+      'div[role="button"][tabindex="0"]',
+      'div[class*="css-"][dir="auto"]'
     ];
     
-    // Randomly return different numbers of replies
-    const numReplies = Math.floor(Math.random() * 4);
-    return mockReplies.slice(0, numReplies);
+    for (const pattern of threadPatterns) {
+      const elements = mainContent.querySelectorAll(pattern);
+      for (const element of Array.from(elements)) {
+        // Skip if already processed
+        if (allReplies.some(r => element.textContent?.includes(r.text || ''))) continue;
+        
+        const reply = this.extractSingleReply(element as HTMLElement);
+        if (reply && reply.text && reply.text.length > 10) {
+          // Additional validation - must have author or timestamp
+          if (reply.author || reply.timestamp) {
+            allReplies.push(reply);
+          }
+        }
+      }
+    }
+    
+    // If none found yet, try embedded JSON data blobs (Next.js/GraphQL dehydrated state)
+    if (allReplies.length === 0) {
+      try {
+        const jsonReplies = parseRepliesFromEmbeddedJSON(doc);
+        if (jsonReplies.length > 0) {
+          this.log(`📦 Extracted ${jsonReplies.length} replies from embedded JSON`);
+          allReplies.push(...jsonReplies);
+          chrome.storage.local.set({ lastReplySource: 'json' });
+        }
+      } catch (e) {
+        this.log('Embedded JSON parse failed', e);
+      }
+    }
+
+    // Remove duplicates and sort by appearance
+    const uniqueReplies = allReplies.filter((reply, index, self) =>
+      index === self.findIndex(r => 
+        r.text === reply.text && r.author === reply.author
+      )
+    );
+    
+    console.log(`Extracted ${uniqueReplies.length} unique replies`);
+    return uniqueReplies;
+  }
+
+  private extractRepliesFromCurrentPage(): CommentData[] {
+    return parseRepliesFromCurrentPage(document);
+  }
+  
+  private async waitForCommentsToLoad(maxWaitTime: number = 5000): Promise<CommentData[]> {
+    return new Promise((resolve) => {
+      const startTime = Date.now();
+      let resolved = false;
+      
+      // Function to check for comments
+      const checkForComments = () => {
+        const comments = this.extractCommentsFromPage();
+        if (comments.length > 0) {
+          console.log(`✅ Found ${comments.length} comments after waiting`);
+          resolved = true;
+          resolve(comments);
+          return true;
+        }
+        return false;
+      };
+      
+      // Check immediately
+      if (checkForComments()) return;
+      
+      // Set up mutation observer to detect when comments are added
+      const observer = new MutationObserver((mutations) => {
+        if (resolved) return;
+        
+        // Check if any new nodes might be comments
+        for (const mutation of mutations) {
+          if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+            if (checkForComments()) {
+              observer.disconnect();
+              return;
+            }
+          }
+        }
+      });
+      
+      // Start observing
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+      
+      // Also check periodically
+      const checkInterval = setInterval(() => {
+        if (resolved || Date.now() - startTime > maxWaitTime) {
+          clearInterval(checkInterval);
+          observer.disconnect();
+          if (!resolved) {
+            console.log('⏱️ Timeout waiting for comments');
+            resolve([]);
+          }
+          return;
+        }
+        checkForComments();
+      }, 500);
+    });
+  }
+  
+  private extractCommentsFromPage(): CommentData[] {
+    const comments: CommentData[] = [];
+    const processedTexts = new Set<string>();
+    
+    // Multiple strategies to find comments
+    // Strategy 1: Look for articles that appear to be comments
+    const articles = document.querySelectorAll('article');
+    let foundMainPost = false;
+    
+    for (const article of Array.from(articles)) {
+      // Skip if this looks like the main post (usually has more content)
+      if (!foundMainPost) {
+        const imgCount = article.querySelectorAll('img').length;
+        const videoCount = article.querySelectorAll('video').length;
+        if (imgCount > 1 || videoCount > 0) {
+          foundMainPost = true;
+          continue;
+        }
+      }
+      
+      const comment = this.extractCommentFromElement(article);
+      if (comment && !processedTexts.has(comment.text || '')) {
+        comments.push(comment);
+        processedTexts.add(comment.text || '');
+      }
+    }
+    
+    // Strategy 2: Look for divs with specific patterns
+    if (comments.length === 0) {
+      const possibleComments = document.querySelectorAll('div[role="button"], div[data-pressable-container="true"]');
+      
+      for (const elem of Array.from(possibleComments)) {
+        const comment = this.extractCommentFromElement(elem as HTMLElement);
+        if (comment && !processedTexts.has(comment.text || '')) {
+          comments.push(comment);
+          processedTexts.add(comment.text || '');
+        }
+      }
+    }
+    
+    return comments;
+  }
+  
+  private extractCommentFromElement(element: HTMLElement): CommentData | null {
+    // Look for author info
+    const authorLink = element.querySelector('a[href*="/@"], a[href*="/threads.com/@"]') as HTMLAnchorElement;
+    let author = null;
+    
+    if (authorLink) {
+      const match = authorLink.href.match(/@([^/?]+)/);
+      if (match) {
+        author = match[1];
+      }
+    }
+    
+    // Look for comment text
+    let text = '';
+    const textCandidates = element.querySelectorAll('span[dir="auto"], div[dir="auto"], span[style*="line-height"]');
+    
+    for (const candidate of Array.from(textCandidates)) {
+      const candidateText = candidate.textContent?.trim() || '';
+      // Skip if it's UI text or too short
+      if (candidateText.length > 10 && 
+          !candidateText.match(/^(\d+\s*)?(reply|replies|like|likes|share|follow|post|posts|repost|reposts)$/i) &&
+          candidateText !== author &&
+          !candidateText.includes('Translate')) {
+        text = candidateText;
+        break;
+      }
+    }
+    
+    // Look for timestamp
+    const timeElement = element.querySelector('time, a[href*="/post/"] span');
+    const timestamp = timeElement?.textContent?.trim() || null;
+    
+    // Only return if we have meaningful content
+    if (text && text.length > 5) {
+      return {
+        id: `comment-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        author,
+        text,
+        timestamp
+      };
+    }
+    
+    return null;
+  }
+  
+  private async fetchCommentsInNewTab(url: string): Promise<CommentData[]> {
+    // This would require using chrome.tabs API which needs additional permissions
+    // For now, we'll inform the user they need to click on the actual post
+    console.log('🚧 Direct navigation required - please click on the post to view comments');
+    return [];
+  }
+
+  private extractSingleReply(container: HTMLElement): CommentData | null {
+    return parseSingleReply(container);
+  }
+  
+  private extractRepliesAlternative(doc: Document): CommentData[] {
+    const replies: CommentData[] = [];
+    
+    // Alternative extraction for Threads-specific structure
+    // Look for comment containers that follow a specific pattern
+    const possibleComments = doc.querySelectorAll('div');
+    
+    for (const div of Array.from(possibleComments)) {
+      // Check if this div contains comment-like content
+      const hasUserLink = div.querySelector('a[href*="/@"]') || div.querySelector('a[href*="/t/"]');
+      const hasText = div.textContent && div.textContent.trim().length > 20;
+      const hasTimeInfo = div.querySelector('time') || div.textContent?.match(/\d+[hmd]/);
+      
+      if (hasUserLink && hasText && hasTimeInfo) {
+        const reply = this.extractSingleReply(div as HTMLElement);
+        if (reply && reply.text && !replies.some(r => r.text === reply.text)) {
+          replies.push(reply);
+        }
+      }
+    }
+    
+    console.log(`Alternative extraction found ${replies.length} replies`);
+    return replies;
   }
 
   private createExpansionElement(replies: CommentData[], commentId: string): HTMLElement {
@@ -233,7 +554,7 @@ class ThreadForgeUIImprover {
           <div class="threadforge-replies-list">
             ${replies.map(reply => this.createReplyHTML(reply)).join('')}
           </div>
-          <button class="threadforge-close-btn" onclick="this.parentElement.parentElement.remove(); window.threadForgeInstance?.onCommentClosed('${commentId}')">
+          <button class="threadforge-close-btn" data-threadforge-comment-id="${commentId}">
             Close Replies
           </button>
         </div>
@@ -244,13 +565,24 @@ class ThreadForgeUIImprover {
           <div class="threadforge-no-replies">
             <span>💭 No replies yet</span>
           </div>
-          <button class="threadforge-close-btn" onclick="this.parentElement.parentElement.remove(); window.threadForgeInstance?.onCommentClosed('${commentId}')">
+          <button class="threadforge-close-btn" data-threadforge-comment-id="${commentId}">
             Close
           </button>
         </div>
       `;
     }
-    
+    // Attach close handler within the content script context (avoids isolated world issues)
+    const closeBtn = expansionDiv.querySelector('.threadforge-close-btn') as HTMLButtonElement | null;
+    if (closeBtn) {
+      closeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        expansionDiv.remove();
+        this.onCommentClosed(commentId);
+      }, true);
+    }
+
     return expansionDiv;
   }
 
@@ -272,7 +604,7 @@ class ThreadForgeUIImprover {
     return `
       <div class="threadforge-error-content">
         <span>❌ Failed to load replies</span>
-        <button class="threadforge-close-btn" onclick="this.parentElement.parentElement.remove(); window.threadForgeInstance?.onCommentClosed('${commentId}')">
+        <button class="threadforge-close-btn" data-threadforge-comment-id="${commentId}">
           Close
         </button>
       </div>
@@ -285,6 +617,19 @@ class ThreadForgeUIImprover {
 
   public onCommentClosed(commentId: string): void {
     this.expandedComments.delete(commentId);
+  }
+
+  private log(...args: any[]): void {
+    if (!this.settings.debug) return;
+    try { console.log(...args); } catch {}
+  }
+
+  private async incrementStat(key: 'expandedCount' | 'interceptedCount'): Promise<void> {
+    try {
+      const current = await chrome.storage.local.get(key);
+      const next = (current[key] || 0) + 1;
+      await chrome.storage.local.set({ [key]: next });
+    } catch {}
   }
 
   private addCustomStyles(): void {
@@ -412,12 +757,20 @@ class ThreadForgeUIImprover {
         font-weight: 600;
         transition: all 0.2s ease;
         float: right;
+        position: relative;
+        z-index: 9999;
+        pointer-events: auto;
       }
 
       .threadforge-close-btn:hover {
         background: linear-gradient(135deg, #495057, #343a40);
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(108, 117, 125, 0.3);
+      }
+      
+      .threadforge-close-btn:active {
+        transform: translateY(0);
+        box-shadow: 0 2px 6px rgba(108, 117, 125, 0.2);
       }
 
       .threadforge-no-replies {

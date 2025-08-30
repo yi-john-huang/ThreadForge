@@ -13,6 +13,7 @@ export interface ExtensionSettings {
   enableInlineExpansion: boolean;
   autoExpandReplies: boolean;
   maxReplyDepth: number;
+  debug?: boolean;
 }
 
 export interface ClickInterceptionResult {

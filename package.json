@@ -1,17 +1,25 @@
 {
   "name": "threadforge-ui-improver",
-  "version": "1.0.0",
+  "version": "1.0.7",
   "description": "Chrome extension to improve Threads UI - enable inline comment expansion instead of page redirects",
   "main": "index.js",
   "scripts": {
     "build": "webpack --mode=production",
     "dev": "webpack --mode=development --watch",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.260",
+    "@types/jest": "^29.5.12",
     "copy-webpack-plugin": "^12.0.2",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "jest-junit": "^16.0.0",
     "ts-loader": "^9.5.1",
+    "ts-jest": "^29.2.5",
     "typescript": "^5.3.3",
     "webpack": "^5.99.0",
     "webpack-cli": "^5.1.4"

@@ -71,3 +71,34 @@ export interface APIError {
   error_subcode?: number;
   fbtrace_id?: string;
 }
+
+export interface RequestConfig {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  headers?: Record<string, string>;
+  body?: string;
+  timeout?: number;
+  retries?: number;
+}
+
+export interface APIRequestInterceptor {
+  (config: RequestConfig): Promise<RequestConfig> | RequestConfig;
+}
+
+export interface APIResponseInterceptor {
+  (response: Response, data: any): Promise<any> | any;
+}
+
+export interface RateLimitInfo {
+  limit: number;
+  remaining: number;
+  resetTime: Date;
+  windowStart: Date;
+}
+
+export interface APIServiceConfig {
+  baseURL: string;
+  timeout: number;
+  maxRetries: number;
+  rateLimitWindow: number; // 7 days in milliseconds
+  rateLimitQueries: number; // 500 queries per window
+}

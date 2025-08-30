@@ -231,6 +231,13 @@
           <div class="toggle-slider"></div>
         </div>
       </div>
+
+      <div class="setting-item">
+        <span class="setting-label">Enable debug logs</span>
+        <div class="toggle-switch" id="debugToggle">
+          <div class="toggle-slider"></div>
+        </div>
+      </div>
     </div>
 
     <button class="action-button" id="refreshButton">
@@ -249,8 +256,12 @@
     </div>
   </div>
 
+  <div class="footer" id="debugInfo" style="display:none;">
+    Debug: <span id="lastReplySource">n/a</span>
+  </div>
+
   <div class="footer">
-    ThreadForge UI Improver v1.0.0
+    ThreadForge UI Improver v1.0.5
   </div>
 
   <script src="popup.js"></script>
