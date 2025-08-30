@@ -44,7 +44,7 @@
   - Write integration tests for token lifecycle scenarios
   - _Requirements: 2.3, 2.4_
 
-- [ ] 6. Create authentication status management
+- [x] 6. Create authentication status management
   - Add isAuthenticated() and getAuthStatus() methods
   - Implement authentication event broadcasting to popup and content scripts
   - Create authentication error handling with user-friendly messages
@@ -54,7 +54,7 @@
 
 ## Threads API Service Implementation
 
-- [ ] 7. Create base API service with request handling
+- [x] 7. Create base API service with request handling
   - Create src/api/threadsApiService.ts with ThreadsAPIService class
   - Implement base HTTP client with fetch API and error handling
   - Add request/response interceptors for authentication and logging

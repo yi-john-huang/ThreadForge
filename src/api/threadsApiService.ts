@@ -11,7 +11,12 @@ import {
   APIResponseInterceptor,
   RateLimitInfo,
   APIError,
-  ThreadsAPIResponse
+  ThreadsAPIResponse,
+  ThreadData,
+  ReplyData,
+  UserProfile,
+  MediaAttachment,
+  PaginationOptions
 } from './types';
 
 export class ThreadsAPIService {
@@ -459,5 +464,235 @@ export class ThreadsAPIService {
    */
   getConfig(): APIServiceConfig {
     return { ...this.config };
+  }
+
+  /**
+   * Fetch a single thread by ID
+   * Requirements: 1.2 (thread data fetching)
+   */
+  async getThread(threadId: string): Promise<ThreadData> {
+    if (!threadId || threadId.trim() === '') {
+      throw new Error('Invalid thread ID');
+    }
+
+    // Define fields to fetch from Threads API
+    const fields = [
+      'id',
+      'media_product_type',
+      'media_type', 
+      'media_url',
+      'owner',
+      'permalink',
+      'shortcode',
+      'text',
+      'thumbnail_url',
+      'timestamp',
+      'username',
+      'children',
+      'like_count',
+      'reply_count'
+    ].join(',');
+
+    const endpoint = `/${threadId}?fields=${fields}`;
+
+    try {
+      const response = await this.request<ThreadsAPIResponse<any>>(endpoint);
+      
+      if (!response.data) {
+        throw new Error('Invalid API response format');
+      }
+
+      return this.transformThreadData(response.data);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error('Failed to fetch thread');
+    }
+  }
+
+  /**
+   * Fetch replies for a thread with pagination support
+   * Requirements: 1.3 (reply fetching), 3.2 (content display)
+   */
+  async getThreadReplies(
+    threadId: string, 
+    options: PaginationOptions = {}
+  ): Promise<ThreadsAPIResponse<ReplyData[]>> {
+    if (!threadId || threadId.trim() === '') {
+      throw new Error('Invalid thread ID');
+    }
+
+    // Build query parameters
+    const params = new URLSearchParams();
+    
+    // Add pagination parameters
+    if (options.after) {
+      params.append('after', options.after);
+    }
+    if (options.before) {
+      params.append('before', options.before);
+    }
+    if (options.limit) {
+      params.append('limit', options.limit.toString());
+    }
+
+    // Define fields for replies
+    const fields = [
+      'id',
+      'text',
+      'owner',
+      'timestamp',
+      'like_count',
+      'reply_count',
+      'media_type',
+      'media_url',
+      'thumbnail_url'
+    ].join(',');
+    
+    params.append('fields', fields);
+
+    const endpoint = `/${threadId}/replies?${params.toString()}`;
+
+    try {
+      const response = await this.request<ThreadsAPIResponse<any[]>>(endpoint);
+      
+      if (!response.data) {
+        throw new Error('Invalid API response format');
+      }
+
+      // Transform replies data and calculate depth
+      const transformedReplies = response.data.map((reply: any) => 
+        this.transformReplyData(reply, this.calculateReplyDepth(threadId, reply.id))
+      );
+
+      return {
+        data: transformedReplies,
+        paging: response.paging
+      };
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error('Failed to fetch thread replies');
+    }
+  }
+
+  /**
+   * Transform raw API thread data to ThreadData format
+   * Requirements: 1.2 (thread data fetching)
+   */
+  private transformThreadData(rawData: any): ThreadData {
+    const thread: ThreadData = {
+      id: rawData.id,
+      author: this.transformUserProfile(rawData.owner),
+      text: rawData.text || '',
+      media: this.transformMediaAttachments(rawData),
+      replyCount: rawData.reply_count || 0,
+      likeCount: rawData.like_count || 0,
+      repostCount: 0, // Not available in current API
+      timestamp: this.parseTimestamp(rawData.timestamp),
+      replies: [],
+      parentThread: undefined
+    };
+
+    return thread;
+  }
+
+  /**
+   * Transform raw API reply data to ReplyData format
+   * Requirements: 1.3 (reply fetching)
+   */
+  private transformReplyData(rawData: any, depth: number = 0): ReplyData {
+    const reply: ReplyData = {
+      id: rawData.id,
+      author: this.transformUserProfile(rawData.owner),
+      text: rawData.text || '',
+      timestamp: this.parseTimestamp(rawData.timestamp),
+      likeCount: rawData.like_count || 0,
+      parentReply: undefined, // Will be set during nesting logic
+      nestedReplies: [],
+      depth
+    };
+
+    return reply;
+  }
+
+  /**
+   * Transform API user data to UserProfile format
+   */
+  private transformUserProfile(rawUser: any): UserProfile {
+    if (!rawUser) {
+      return {
+        id: 'unknown',
+        username: 'unknown',
+        displayName: 'Unknown User',
+        isVerified: false
+      };
+    }
+
+    return {
+      id: rawUser.id,
+      username: rawUser.username || 'unknown',
+      displayName: rawUser.username || 'Unknown User',
+      avatar: rawUser.profile_pic_url || undefined,
+      isVerified: rawUser.is_verified || false
+    };
+  }
+
+  /**
+   * Transform media attachments from API format
+   */
+  private transformMediaAttachments(rawData: any): MediaAttachment[] {
+    const media: MediaAttachment[] = [];
+
+    if (rawData.media_type && rawData.media_url) {
+      let mediaType: 'image' | 'video';
+      
+      switch (rawData.media_type) {
+        case 'IMAGE':
+        case 'CAROUSEL_ALBUM':
+          mediaType = 'image';
+          break;
+        case 'VIDEO':
+          mediaType = 'video';
+          break;
+        default:
+          return media; // Skip unsupported media types
+      }
+
+      media.push({
+        id: `${rawData.id}_media`,
+        type: mediaType,
+        url: rawData.media_url,
+        thumbnailUrl: rawData.thumbnail_url,
+        altText: rawData.text || undefined
+      });
+    }
+
+    return media;
+  }
+
+  /**
+   * Parse timestamp string to Date object
+   */
+  private parseTimestamp(timestamp?: string): Date {
+    if (!timestamp) {
+      return new Date();
+    }
+
+    // Handle Instagram/Threads timestamp format (ISO 8601)
+    return new Date(timestamp);
+  }
+
+  /**
+   * Calculate reply depth for nested threading
+   * This is a simple implementation - can be enhanced with actual parent-child relationships
+   */
+  private calculateReplyDepth(parentId: string, replyId: string): number {
+    // For now, assume all direct replies to a thread have depth 0
+    // Nested replies would have depth 1, 2, etc.
+    // This would need to be enhanced with actual API data about parent-child relationships
+    return parentId.startsWith('reply') ? 1 : 0;
   }
 }

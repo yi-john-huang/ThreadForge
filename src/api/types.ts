@@ -102,3 +102,28 @@ export interface APIServiceConfig {
   rateLimitWindow: number; // 7 days in milliseconds
   rateLimitQueries: number; // 500 queries per window
 }
+
+export interface PaginationOptions {
+  after?: string;
+  before?: string;
+  limit?: number;
+}
+
+export interface ThreadsAPIRawResponse {
+  id: string;
+  text?: string | null;
+  owner?: {
+    id: string;
+    username: string;
+  };
+  timestamp?: string;
+  like_count?: number;
+  reply_count?: number;
+  media_type?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'CAROUSEL_ALBUM';
+  media_url?: string;
+  thumbnail_url?: string;
+  permalink?: string;
+  children?: {
+    data: ThreadsAPIRawResponse[];
+  };
+}
