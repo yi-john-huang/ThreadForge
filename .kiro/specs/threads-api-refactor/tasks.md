@@ -2,7 +2,7 @@
 
 ## Foundation and Project Setup
 
-- [ ] 1. Update manifest.json for Threads API integration
+- [x] 1. Update manifest.json for Threads API integration
   - Add "identity" permission for OAuth2 flow
   - Add host_permissions for graph.threads.net API domain
   - Update background service worker configuration
