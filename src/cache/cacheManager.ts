@@ -143,6 +143,76 @@ export class CacheManager {
     });
   }
 
+  private async enforceEvictionPolicy(newEntrySize: number): Promise<void> {
+    try {
+      const storage = this.getStorage();
+      const allItems = await storage.get(null);
+      const cacheEntries: Array<{ key: string; entry: CacheEntry }> = [];
+      let totalSize = 0;
+      let totalEntries = 0;
+
+      // Collect all cache entries
+      for (const [key, value] of Object.entries(allItems || {})) {
+        if (key.startsWith('cache:') && key !== 'cache:stats') {
+          const entry = value as CacheEntry;
+          cacheEntries.push({ key, entry });
+          totalSize += entry.size;
+          totalEntries++;
+        }
+      }
+
+      // Sort by lastAccessed (LRU - oldest first)
+      cacheEntries.sort((a, b) => a.entry.lastAccessed - b.entry.lastAccessed);
+
+      const entriesToEvict: string[] = [];
+      let sizeToFree = 0;
+
+      // Check if we need to evict based on entry count
+      // Need to make room for the new entry
+      while ((totalEntries + 1) > this.config.maxEntries && cacheEntries.length > 0) {
+        const evictEntry = cacheEntries.shift();
+        if (evictEntry) {
+          entriesToEvict.push(evictEntry.key);
+          sizeToFree += evictEntry.entry.size;
+          totalEntries--;
+          totalSize -= evictEntry.entry.size;
+        }
+      }
+
+      // Check if we need to evict based on size (including new entry size)
+      const projectedSize = totalSize + newEntrySize;
+      while (projectedSize - sizeToFree > this.config.maxSize && cacheEntries.length > 0) {
+        const evictEntry = cacheEntries.shift();
+        if (evictEntry) {
+          // Only add if not already marked for eviction
+          if (!entriesToEvict.includes(evictEntry.key)) {
+            entriesToEvict.push(evictEntry.key);
+            sizeToFree += evictEntry.entry.size;
+          }
+        }
+      }
+
+      // Perform evictions
+      if (entriesToEvict.length > 0) {
+        await storage.remove(entriesToEvict);
+        
+        // Emit eviction events and update statistics
+        for (const key of entriesToEvict) {
+          const originalKey = key.replace('cache:', '');
+          this.emitEvent({
+            type: 'evict',
+            key: originalKey,
+            timestamp: Date.now()
+          });
+          await this.updateStatistics('evict');
+        }
+      }
+    } catch (error) {
+      // Don't let eviction policy errors break the cache operation
+      console.warn('Failed to enforce eviction policy:', error);
+    }
+  }
+
   generateKey(namespace: string, identifier: string, options: CacheKeyOptions = {}): string {
     const parts: string[] = ['cache'];
     
@@ -192,6 +262,9 @@ export class CacheManager {
         version: options.version,
         tags: options.tags
       };
+
+      // Check if we need to evict entries before adding new one
+      await this.enforceEvictionPolicy(entry.size);
 
       await storage.set({ [cacheKey]: entry });
       
@@ -317,13 +390,43 @@ export class CacheManager {
     try {
       const storage = this.getStorage();
       const result = await storage.get(['cache:stats']);
-      return (result && result['cache:stats']) || {
+      const baseStats = (result && result['cache:stats']) || {
         totalEntries: 0,
         totalSize: 0,
         hitCount: 0,
         missCount: 0,
         evictionCount: 0,
         hitRate: 0
+      };
+
+      // Calculate real-time statistics by examining all cache entries
+      const allItems = await storage.get(null);
+      let actualTotalSize = 0;
+      let actualTotalEntries = 0;
+      let oldestEntry: number | undefined;
+      let newestEntry: number | undefined;
+
+      for (const [key, value] of Object.entries(allItems || {})) {
+        if (key.startsWith('cache:') && key !== 'cache:stats') {
+          const entry = value as CacheEntry;
+          actualTotalSize += entry.size;
+          actualTotalEntries++;
+          
+          if (!oldestEntry || entry.createdAt < oldestEntry) {
+            oldestEntry = entry.createdAt;
+          }
+          if (!newestEntry || entry.createdAt > newestEntry) {
+            newestEntry = entry.createdAt;
+          }
+        }
+      }
+
+      return {
+        ...baseStats,
+        totalEntries: actualTotalEntries,
+        totalSize: actualTotalSize,
+        oldestEntry,
+        newestEntry
       };
     } catch (error) {
       throw new Error(`Failed to get cache statistics: ${(error as Error).message}`);
@@ -348,7 +451,7 @@ export class CacheManager {
       const now = Date.now();
       const expiredKeys: string[] = [];
 
-      for (const [key, value] of Object.entries(allItems)) {
+      for (const [key, value] of Object.entries(allItems || {})) {
         if (key.startsWith('cache:') && key !== 'cache:stats') {
           const entry = value as CacheEntry;
           if (this.isExpired(entry)) {

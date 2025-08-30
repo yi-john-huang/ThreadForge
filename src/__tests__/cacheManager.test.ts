@@ -324,13 +324,14 @@ describe('CacheManager', () => {
   });
 
   describe('Chrome Storage API Integration', () => {
-    test('should use sync storage when configured', () => {
+    test('should use sync storage when configured', async () => {
       const syncConfig = { ...defaultConfig, storageType: 'sync' as const };
       const syncManager = new CacheManager(syncConfig);
       
       mockStorage.sync.set.mockResolvedValueOnce(undefined);
+      mockStorage.sync.get.mockResolvedValueOnce({});
       
-      syncManager.set('test-key', 'test-value');
+      await syncManager.set('test-key', 'test-value');
       
       expect(mockStorage.sync.set).toHaveBeenCalled();
     });
@@ -355,7 +356,8 @@ describe('CacheManager', () => {
 
   describe('Cache Statistics', () => {
     test('should return cache statistics', async () => {
-      mockStorage.local.get.mockResolvedValueOnce({
+      // Mock the storage to return both stats and some sample cache entries
+      const mockData = {
         'cache:stats': {
           totalEntries: 5,
           totalSize: 1024,
@@ -363,13 +365,21 @@ describe('CacheManager', () => {
           missCount: 3,
           evictionCount: 1,
           hitRate: 76.9
-        }
-      });
+        },
+        'cache:entry1': { key: 'entry1', value: 'test', size: 100, createdAt: Date.now(), lastAccessed: Date.now(), ttl: 5000 },
+        'cache:entry2': { key: 'entry2', value: 'test', size: 150, createdAt: Date.now(), lastAccessed: Date.now(), ttl: 5000 }
+      };
+      
+      // Mock both calls to storage.get(null) - one for stats, one for real-time calculation
+      mockStorage.local.get
+        .mockResolvedValueOnce(mockData) // First call for getting base stats
+        .mockResolvedValueOnce(mockData); // Second call for real-time calculation
       
       const stats = await cacheManager.getStatistics();
       
-      expect(stats.totalEntries).toBe(5);
-      expect(stats.hitRate).toBe(76.9);
+      expect(stats.totalEntries).toBe(2); // Real-time count from actual entries
+      expect(stats.hitRate).toBe(76.9); // From base stats
+      expect(stats.totalSize).toBe(250); // Real-time calculation: 100 + 150
     });
 
     test('should update hit count on cache hit', async () => {
