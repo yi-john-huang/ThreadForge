@@ -10,7 +10,7 @@
   - Create unit tests for manifest validation
   - _Requirements: 1.1, 2.1_
 
-- [ ] 2. Create core type definitions and interfaces
+- [x] 2. Create core type definitions and interfaces
   - Create src/api/types.ts with ThreadData, ReplyData, UserProfile interfaces from design
   - Create src/auth/types.ts with AuthenticationContext, OAuth2Config interfaces
   - Create src/cache/types.ts with CacheEntry, CacheConfig interfaces  
