@@ -337,4 +337,331 @@ describe('OAuth2AuthenticationService', () => {
       expect(status.needsRefresh).toBe(false);
     });
   });
+
+  describe('Token Refresh and Lifecycle Management', () => {
+    describe('refreshTokens()', () => {
+      test('should successfully refresh tokens with valid refresh token', async () => {
+        const mockRefreshToken = 'refresh_token_123';
+        
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({
+            access_token: 'new_access_token_456',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new_refresh_token_456',
+            scope: 'threads_basic threads_content_publish'
+          })
+        });
+
+        mockChromeStorage.sync.set.mockResolvedValue(undefined);
+
+        const result = await authService.refreshTokens(mockRefreshToken);
+
+        expect(result.success).toBe(true);
+        expect(result.context).toBeDefined();
+        expect(result.context!.accessToken).toBe('new_access_token_456');
+        expect(result.context!.refreshToken).toBe('new_refresh_token_456');
+        
+        expect(global.fetch).toHaveBeenCalledWith('https://graph.threads.net/oauth/access_token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: 'client_id=test_client_id&grant_type=refresh_token&refresh_token=refresh_token_123'
+        });
+      });
+
+      test('should handle invalid refresh token error', async () => {
+        const mockRefreshToken = 'invalid_refresh_token';
+        
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({
+            error: 'invalid_grant',
+            error_description: 'Refresh token is invalid or expired'
+          })
+        });
+
+        const result = await authService.refreshTokens(mockRefreshToken);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBeDefined();
+        expect(result.error!.code).toBe('INVALID_GRANT');
+        expect(result.error!.message).toBe('Refresh token is invalid or expired');
+      });
+
+      test('should handle network errors during token refresh', async () => {
+        const mockRefreshToken = 'refresh_token_123';
+        
+        global.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
+
+        const result = await authService.refreshTokens(mockRefreshToken);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBeDefined();
+        expect(result.error!.code).toBe('NETWORK_ERROR');
+        expect(result.error!.message).toBe('Failed to refresh access token');
+      });
+
+      test('should throw error for empty refresh token', async () => {
+        await expect(authService.refreshTokens('')).rejects.toThrow('Refresh token is required');
+      });
+    });
+
+    describe('automaticTokenRefresh()', () => {
+      test('should automatically refresh token when near expiration', async () => {
+        const nearExpirationContext: AuthenticationContext = {
+          accessToken: 'access_token_123',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() + 300000), // 5 minutes from now (needs refresh)
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...nearExpirationContext,
+            expiresAt: nearExpirationContext.expiresAt.toISOString()
+          }
+        });
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({
+            access_token: 'new_access_token_456',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new_refresh_token_456',
+            scope: 'threads_basic'
+          })
+        });
+
+        mockChromeStorage.sync.set.mockResolvedValue(undefined);
+
+        const result = await authService.automaticTokenRefresh();
+
+        expect(result.success).toBe(true);
+        expect(result.context).toBeDefined();
+        expect(result.context!.accessToken).toBe('new_access_token_456');
+      });
+
+      test('should not refresh token when not near expiration', async () => {
+        const validContext: AuthenticationContext = {
+          accessToken: 'access_token_123',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() + 3600000), // 1 hour from now (no refresh needed)
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...validContext,
+            expiresAt: validContext.expiresAt.toISOString()
+          }
+        });
+
+        const result = await authService.automaticTokenRefresh();
+
+        expect(result.success).toBe(true);
+        expect(result.context).toBeDefined();
+        expect(result.context!.accessToken).toBe('access_token_123'); // No change
+        expect(global.fetch).not.toHaveBeenCalled(); // No refresh call made
+      });
+
+      test('should handle case when no stored context exists', async () => {
+        mockChromeStorage.sync.get.mockResolvedValue({});
+
+        const result = await authService.automaticTokenRefresh();
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBeDefined();
+        expect(result.error!.code).toBe('NO_STORED_CONTEXT');
+        expect(result.error!.message).toBe('No authentication context found');
+      });
+    });
+
+    describe('revokeAccess()', () => {
+      test('should successfully revoke access token', async () => {
+        const mockAccessToken = 'access_token_123';
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true
+          })
+        });
+
+        mockChromeStorage.sync.remove.mockResolvedValue(undefined);
+
+        const result = await authService.revokeAccess(mockAccessToken);
+
+        expect(result.success).toBe(true);
+        expect(global.fetch).toHaveBeenCalledWith('https://graph.threads.net/oauth/access_token', {
+          method: 'DELETE',
+          headers: {
+            'Authorization': 'Bearer access_token_123',
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        });
+        expect(mockChromeStorage.sync.remove).toHaveBeenCalledWith(['threadforge_auth_context']);
+      });
+
+      test('should handle revocation API errors gracefully', async () => {
+        const mockAccessToken = 'access_token_123';
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({
+            error: 'invalid_token',
+            error_description: 'Token is invalid'
+          })
+        });
+
+        mockChromeStorage.sync.remove.mockResolvedValue(undefined);
+
+        const result = await authService.revokeAccess(mockAccessToken);
+
+        expect(result.success).toBe(true); // Should still clear local storage
+        expect(mockChromeStorage.sync.remove).toHaveBeenCalledWith(['threadforge_auth_context']);
+      });
+
+      test('should handle network errors during revocation', async () => {
+        const mockAccessToken = 'access_token_123';
+
+        global.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
+        mockChromeStorage.sync.remove.mockResolvedValue(undefined);
+
+        const result = await authService.revokeAccess(mockAccessToken);
+
+        expect(result.success).toBe(true); // Should still clear local storage
+        expect(mockChromeStorage.sync.remove).toHaveBeenCalledWith(['threadforge_auth_context']);
+      });
+
+      test('should revoke with stored context when no token provided', async () => {
+        const storedContext: AuthenticationContext = {
+          accessToken: 'stored_access_token',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() + 3600000),
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...storedContext,
+            expiresAt: storedContext.expiresAt.toISOString()
+          }
+        });
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ success: true })
+        });
+
+        mockChromeStorage.sync.remove.mockResolvedValue(undefined);
+
+        const result = await authService.revokeAccess();
+
+        expect(result.success).toBe(true);
+        expect(global.fetch).toHaveBeenCalledWith('https://graph.threads.net/oauth/access_token', {
+          method: 'DELETE',
+          headers: {
+            'Authorization': 'Bearer stored_access_token',
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        });
+      });
+    });
+
+    describe('Token Expiration Management', () => {
+      test('should check if token needs refresh with custom buffer time', () => {
+        const customBufferMs = 20 * 60 * 1000; // 20 minutes
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes from now
+        
+        const needsRefresh = authService.doesTokenNeedRefresh(expiresAt, customBufferMs);
+        
+        expect(needsRefresh).toBe(true);
+      });
+
+      test('should return false when token does not need refresh', () => {
+        const customBufferMs = 10 * 60 * 1000; // 10 minutes
+        const expiresAt = new Date(Date.now() + 20 * 60 * 1000); // 20 minutes from now
+        
+        const needsRefresh = authService.doesTokenNeedRefresh(expiresAt, customBufferMs);
+        
+        expect(needsRefresh).toBe(false);
+      });
+
+      test('should return true for already expired token', () => {
+        const expiresAt = new Date(Date.now() - 60000); // 1 minute ago (expired)
+        
+        const needsRefresh = authService.doesTokenNeedRefresh(expiresAt);
+        
+        expect(needsRefresh).toBe(true);
+      });
+    });
+
+    describe('Background Token Refresh Scheduling', () => {
+      test('should schedule background refresh when token needs it', async () => {
+        const nearExpirationContext: AuthenticationContext = {
+          accessToken: 'access_token_123',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() + 300000), // 5 minutes from now
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...nearExpirationContext,
+            expiresAt: nearExpirationContext.expiresAt.toISOString()
+          }
+        });
+
+        // Mock the alarm API
+        const mockAlarms = {
+          create: jest.fn(),
+          clear: jest.fn()
+        };
+        (global as any).chrome.alarms = mockAlarms;
+
+        await authService.scheduleBackgroundRefresh();
+
+        expect(mockAlarms.create).toHaveBeenCalledWith('tokenRefresh', {
+          delayInMinutes: expect.any(Number)
+        });
+      });
+
+      test('should not schedule refresh when token is valid', async () => {
+        const validContext: AuthenticationContext = {
+          accessToken: 'access_token_123',
+          refreshToken: 'refresh_token_123',
+          expiresAt: new Date(Date.now() + 3600000), // 1 hour from now
+          scopes: ['threads_basic'],
+          userId: 'user_123'
+        };
+
+        mockChromeStorage.sync.get.mockResolvedValue({
+          threadforge_auth_context: {
+            ...validContext,
+            expiresAt: validContext.expiresAt.toISOString()
+          }
+        });
+
+        const mockAlarms = {
+          create: jest.fn(),
+          clear: jest.fn()
+        };
+        (global as any).chrome.alarms = mockAlarms;
+
+        await authService.scheduleBackgroundRefresh();
+
+        expect(mockAlarms.create).not.toHaveBeenCalled();
+      });
+    });
+  });
 });
