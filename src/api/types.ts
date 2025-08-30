@@ -52,6 +52,33 @@ export interface SearchResult {
   data: ThreadData | UserProfile;
 }
 
+export interface ThreadInsights {
+  id: string;
+  impressions: number;
+  reach: number;
+  engagement: number;
+  saves: number;
+  shares: number;
+  profileViews: number;
+  demographics?: {
+    ageGroups: {
+      [key: string]: number;
+    };
+    genders: {
+      male: number;
+      female: number;
+    };
+    topCities: Array<{
+      name: string;
+      percentage: number;
+    }>;
+  };
+}
+
+export interface SearchOptions extends PaginationOptions {
+  type?: 'thread' | 'user';
+}
+
 export interface ThreadsAPIResponse<T> {
   data: T;
   paging?: {

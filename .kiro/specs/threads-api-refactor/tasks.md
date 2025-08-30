@@ -62,7 +62,7 @@
   - Write unit tests for HTTP client and rate limiting
   - _Requirements: 1.1, 1.4, 1.5_
 
-- [ ] 8. Implement thread fetching endpoints
+- [x] 8. Implement thread fetching endpoints
   - Add getThread(threadId) method for single thread retrieval
   - Implement getThreadReplies(threadId) method for reply fetching
   - Create response parsing and data transformation logic

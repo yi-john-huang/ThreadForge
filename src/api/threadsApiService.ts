@@ -16,7 +16,10 @@ import {
   ReplyData,
   UserProfile,
   MediaAttachment,
-  PaginationOptions
+  PaginationOptions,
+  SearchResult,
+  SearchOptions,
+  ThreadInsights
 } from './types';
 
 export class ThreadsAPIService {
@@ -634,7 +637,7 @@ export class ThreadsAPIService {
     return {
       id: rawUser.id,
       username: rawUser.username || 'unknown',
-      displayName: rawUser.username || 'Unknown User',
+      displayName: rawUser.name || rawUser.username || 'Unknown User',
       avatar: rawUser.profile_pic_url || undefined,
       isVerified: rawUser.is_verified || false
     };
@@ -694,5 +697,286 @@ export class ThreadsAPIService {
     // Nested replies would have depth 1, 2, etc.
     // This would need to be enhanced with actual API data about parent-child relationships
     return parentId.startsWith('reply') ? 1 : 0;
+  }
+
+  /**
+   * Fetch user profile information by user ID
+   * Requirements: 1.2 (user profile data)
+   */
+  async getUserProfile(userId: string): Promise<UserProfile> {
+    if (!userId || userId.trim() === '') {
+      throw new Error('Invalid user ID');
+    }
+
+    // Define fields to fetch from Threads API
+    const fields = [
+      'id',
+      'username',
+      'name',
+      'profile_pic_url',
+      'is_verified',
+      'biography',
+      'followers_count',
+      'following_count',
+      'threads_count'
+    ].join(',');
+
+    const endpoint = `/${userId}?fields=${fields}`;
+
+    try {
+      const response = await this.request<ThreadsAPIResponse<any>>(endpoint);
+      
+      if (!response.data) {
+        throw new Error('Invalid API response format');
+      }
+
+      return this.transformUserProfile(response.data);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error('Failed to fetch user profile');
+    }
+  }
+
+  /**
+   * Search for threads based on query string
+   * Requirements: 1.3 (thread discovery)
+   */
+  async searchThreads(
+    query: string, 
+    options: SearchOptions = {}
+  ): Promise<ThreadsAPIResponse<SearchResult[]>> {
+    if (!query || query.trim() === '') {
+      throw new Error('Invalid search query');
+    }
+
+    // Build query parameters
+    const params = new URLSearchParams();
+    params.append('q', query);
+
+    // Add pagination parameters
+    if (options.after) {
+      params.append('after', options.after);
+    }
+    if (options.before) {
+      params.append('before', options.before);
+    }
+    if (options.limit) {
+      params.append('limit', options.limit.toString());
+    }
+    if (options.type) {
+      params.append('type', options.type);
+    }
+
+    // Define fields for search results
+    const fields = [
+      'id',
+      'text',
+      'owner',
+      'timestamp',
+      'like_count',
+      'reply_count',
+      'media_type',
+      'media_url'
+    ].join(',');
+    
+    params.append('fields', fields);
+
+    const endpoint = `/search?${params.toString()}`;
+
+    try {
+      const response = await this.request<ThreadsAPIResponse<any[]>>(endpoint);
+      
+      if (!response.data) {
+        throw new Error('Invalid API response format');
+      }
+
+      // Transform search results and calculate relevance scores
+      const transformedResults = response.data.map((item: any) => 
+        this.transformSearchResult(item, query)
+      );
+
+      return {
+        data: transformedResults,
+        paging: response.paging
+      };
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error('Failed to search threads');
+    }
+  }
+
+  /**
+   * Fetch thread insights and engagement metrics
+   * Requirements: 1.3 (engagement metrics)
+   */
+  async getThreadInsights(threadId: string): Promise<ThreadInsights> {
+    if (!threadId || threadId.trim() === '') {
+      throw new Error('Invalid thread ID');
+    }
+
+    const endpoint = `/${threadId}/insights`;
+
+    try {
+      const response = await this.request<ThreadsAPIResponse<any>>(endpoint);
+      
+      if (!response.data) {
+        throw new Error('Invalid API response format');
+      }
+
+      return this.transformThreadInsights(threadId, response.data);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error('Failed to fetch thread insights');
+    }
+  }
+
+  /**
+   * Transform search result data to SearchResult format
+   */
+  private transformSearchResult(rawData: any, query: string): SearchResult {
+    // Determine if this is a thread or user result
+    const type = rawData.text !== undefined ? 'thread' : 'user';
+    
+    let transformedData: ThreadData | UserProfile;
+    let relevanceScore: number;
+
+    if (type === 'thread') {
+      transformedData = this.transformThreadData(rawData);
+      relevanceScore = this.calculateRelevanceScore(rawData, query, 'thread');
+    } else {
+      transformedData = this.transformUserProfile(rawData);
+      relevanceScore = this.calculateRelevanceScore(rawData, query, 'user');
+    }
+
+    return {
+      id: rawData.id,
+      type,
+      relevanceScore,
+      data: transformedData
+    };
+  }
+
+  /**
+   * Transform thread insights data to ThreadInsights format
+   */
+  private transformThreadInsights(threadId: string, rawData: any): ThreadInsights {
+    const insights: ThreadInsights = {
+      id: threadId,
+      impressions: rawData.impressions || 0,
+      reach: rawData.reach || 0,
+      engagement: rawData.engagement || 0,
+      saves: rawData.saves || 0,
+      shares: rawData.shares || 0,
+      profileViews: rawData.profile_views || 0
+    };
+
+    // Transform demographics data if available
+    if (rawData.demographics) {
+      insights.demographics = {
+        ageGroups: this.transformAgeGroups(rawData.demographics.age_groups),
+        genders: {
+          male: rawData.demographics.gender?.male || 0,
+          female: rawData.demographics.gender?.female || 0
+        },
+        topCities: this.transformTopCities(rawData.demographics.top_cities)
+      };
+    }
+
+    return insights;
+  }
+
+  /**
+   * Calculate relevance score for search results
+   */
+  private calculateRelevanceScore(rawData: any, query: string, type: 'thread' | 'user'): number {
+    let score = 0;
+    const queryLower = query.toLowerCase();
+
+    if (type === 'thread') {
+      const text = (rawData.text || '').toLowerCase();
+      
+      // Text relevance (0-50 points)
+      if (text.includes(queryLower)) {
+        score += 30;
+        // Bonus for exact matches
+        if (text === queryLower) {
+          score += 20;
+        }
+      }
+
+      // Engagement score (0-30 points)
+      const likes = rawData.like_count || 0;
+      const replies = rawData.reply_count || 0;
+      const engagementScore = Math.min(30, (likes + replies * 2) / 10);
+      score += engagementScore;
+
+      // Recency score (0-20 points)
+      if (rawData.timestamp) {
+        const postDate = new Date(rawData.timestamp);
+        const daysSincePost = (Date.now() - postDate.getTime()) / (1000 * 60 * 60 * 24);
+        const recencyScore = Math.max(0, 20 - daysSincePost);
+        score += recencyScore;
+      }
+    } else {
+      // User search relevance
+      const username = (rawData.username || '').toLowerCase();
+      const name = (rawData.name || '').toLowerCase();
+      
+      // Username/name match (0-60 points)
+      if (username.includes(queryLower) || name.includes(queryLower)) {
+        score += 40;
+        if (username === queryLower || name === queryLower) {
+          score += 20;
+        }
+      }
+
+      // Verification bonus (0-20 points)
+      if (rawData.is_verified) {
+        score += 20;
+      }
+
+      // Follower count influence (0-20 points)
+      const followers = rawData.followers_count || 0;
+      const followerScore = Math.min(20, followers / 1000);
+      score += followerScore;
+    }
+
+    return Math.min(100, Math.round(score));
+  }
+
+  /**
+   * Transform age groups data
+   */
+  private transformAgeGroups(rawAgeGroups: any): { [key: string]: number } {
+    if (!rawAgeGroups || typeof rawAgeGroups !== 'object') {
+      return {};
+    }
+
+    const transformed: { [key: string]: number } = {};
+    for (const [ageRange, percentage] of Object.entries(rawAgeGroups)) {
+      transformed[ageRange] = Number(percentage) || 0;
+    }
+
+    return transformed;
+  }
+
+  /**
+   * Transform top cities data
+   */
+  private transformTopCities(rawCities: any[]): Array<{ name: string; percentage: number }> {
+    if (!Array.isArray(rawCities)) {
+      return [];
+    }
+
+    return rawCities.map(city => ({
+      name: city.city || city.name || 'Unknown',
+      percentage: Number(city.percentage) || 0
+    }));
   }
 }
