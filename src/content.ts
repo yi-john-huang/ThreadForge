@@ -5,6 +5,13 @@ import {
   extractSingleReply as parseSingleReply,
   extractRepliesFromEmbeddedJSON as parseRepliesFromEmbeddedJSON,
 } from './utils/extractors';
+import { 
+  extractThreadId, 
+  parseThreadsUrl, 
+  isValidThreadsUrl,
+  extractThreadMetadata,
+  ThreadMetadata 
+} from './utils/threadUtils';
 
 console.log('🧵 ThreadForge UI Improver loaded!');
 
@@ -18,6 +25,7 @@ class ThreadForgeUIImprover {
 
   private expandedComments = new Set<string>();
   private isInitialized = false;
+  public API_TIMEOUT = 10000; // 10 seconds timeout for API requests
 
   constructor() {
     this.init();
@@ -36,6 +44,9 @@ class ThreadForgeUIImprover {
     
     // Setup mutation observer for dynamic content
     this.setupMutationObserver();
+    
+    // Setup background message listener
+    this.setupMessageListener();
     
     // Add custom styles
     this.addCustomStyles();
@@ -78,6 +89,13 @@ class ThreadForgeUIImprover {
     });
   }
 
+  private setupMessageListener(): void {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      this.handleBackgroundMessage(message, sender, sendResponse);
+      return true; // Keep message channel open for async response
+    });
+  }
+
   private processNewContent(container: Element): void {
     // Find all potential comment containers
     const selectors = [
@@ -106,7 +124,7 @@ class ThreadForgeUIImprover {
     }
   }
 
-  private handleClick(event: MouseEvent): void {
+  private async handleClick(event: MouseEvent): Promise<void> {
     if (!this.settings.enableInlineExpansion) return;
 
     const result = this.interceptCommentClick(event);
@@ -114,8 +132,19 @@ class ThreadForgeUIImprover {
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
+      
+      // Extract thread ID using new utility
+      const threadId = extractThreadId(result.commentUrl);
+      if (!threadId) {
+        console.warn('🚫 Could not extract thread ID from URL:', result.commentUrl);
+        return;
+      }
+
       this.incrementStat('interceptedCount');
-      this.expandCommentInline(result.element, result.commentUrl);
+      this.incrementStat('apiRequestCount');
+      
+      // Use API-based expansion instead of DOM scraping
+      await this.expandCommentInline(result.element, result.commentUrl);
     }
   }
 
@@ -179,55 +208,352 @@ class ThreadForgeUIImprover {
 
     this.expandedComments.add(commentId);
     
+    // Extract thread metadata
+    const threadMetadata = extractThreadMetadata(commentUrl);
+    if (!threadMetadata) {
+      console.error('🚫 Could not extract thread metadata from URL:', commentUrl);
+      return;
+    }
+
     // Show loading state
-    const loadingDiv = this.createLoadingElement();
-    commentContainer.appendChild(loadingDiv);
+    this.showLoadingState(commentContainer, 'fetchThread');
 
     try {
-      // Fetch comment data (mock for now)
-      const commentData = await this.fetchCommentData(commentUrl);
+      // Fetch thread data via API (with fallback to DOM scraping)
+      const threadData = await this.fetchThreadDataViaAPI(threadMetadata.threadId);
       
-      // Remove loading
-      loadingDiv.remove();
+      // Remove loading state
+      this.clearLoadingState(commentContainer);
       
       // Create and show expansion
-      const expansionDiv = this.createExpansionElement(commentData, commentId);
+      const expansionDiv = this.createExpansionElement(threadData, commentId);
       commentContainer.appendChild(expansionDiv);
       this.incrementStat('expandedCount');
+      
+      // Cache the successful result
+      await this.cacheThreadData(threadMetadata.threadId, threadData);
       
       // Scroll into view
       expansionDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       
     } catch (error) {
       console.error('❌ Error expanding comment:', error);
-      loadingDiv.innerHTML = this.getErrorHTML(commentId);
-      const closeBtn = loadingDiv.querySelector('.threadforge-close-btn') as HTMLButtonElement | null;
-      if (closeBtn) {
-        closeBtn.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          loadingDiv.remove();
-          this.onCommentClosed(commentId);
+      
+      // Clear loading and show error with fallback options
+      this.clearLoadingState(commentContainer);
+      await this.showErrorWithFallback(commentContainer, commentId, error as Error, commentUrl);
+    }
+  }
+
+  /**
+   * API Integration Methods - Task 15
+   */
+  
+  private async fetchThreadDataViaAPI(threadId: string): Promise<CommentData[]> {
+    console.log('🔗 Fetching thread data via API for thread:', threadId);
+
+    try {
+      // Send message to background service to fetch thread data
+      const response = await this.sendMessageWithTimeout({
+        action: 'fetchThread',
+        threadId: threadId,
+        url: `https://threads.net/t/${threadId}/`
+      });
+
+      if (response.success) {
+        console.log('✅ Successfully fetched thread data via API');
+        return this.transformAPIDataToCommentData(response.data);
+      } else {
+        throw new Error(`API request failed: ${response.error}`);
+      }
+    } catch (error) {
+      console.warn('🚨 API request failed, attempting fallback:', error);
+      
+      // Fallback to DOM scraping
+      return await this.fallbackToDOMScraping(threadId);
+    }
+  }
+
+  private async fetchThreadRepliesViaAPI(threadId: string): Promise<CommentData[]> {
+    const response = await this.sendMessageWithTimeout({
+      action: 'fetchThreadReplies',
+      threadId: threadId
+    });
+
+    if (response.success) {
+      return this.transformAPIDataToCommentData(response.data.replies || []);
+    }
+    
+    throw new Error(`Failed to fetch replies: ${response.error}`);
+  }
+
+  private async sendMessageWithTimeout(message: any, timeout: number = this.API_TIMEOUT): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new Error(`Request timed out after ${timeout}ms`));
+      }, timeout);
+
+      chrome.runtime.sendMessage(message)
+        .then(response => {
+          clearTimeout(timeoutId);
+          resolve(response);
+        })
+        .catch(error => {
+          clearTimeout(timeoutId);
+          reject(error);
         });
+    });
+  }
+
+  private transformAPIDataToCommentData(apiData: any): CommentData[] {
+    if (!apiData) return [];
+    
+    // Handle single thread object
+    if (apiData.replies) {
+      return apiData.replies.map((reply: any) => ({
+        id: reply.id || `reply-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        author: reply.author || reply.username,
+        text: reply.content || reply.text,
+        timestamp: reply.timestamp || reply.created_at,
+        likes: reply.likes || reply.like_count,
+        replies: reply.replies ? this.transformAPIDataToCommentData(reply.replies) : undefined
+      }));
+    }
+    
+    // Handle array of comments/replies
+    if (Array.isArray(apiData)) {
+      return apiData.map(item => ({
+        id: item.id || `comment-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        author: item.author || item.username,
+        text: item.content || item.text,
+        timestamp: item.timestamp || item.created_at,
+        likes: item.likes || item.like_count,
+        replies: item.replies ? this.transformAPIDataToCommentData(item.replies) : undefined
+      }));
+    }
+
+    return [];
+  }
+
+  private async fallbackToDOMScraping(threadId: string): Promise<CommentData[]> {
+    console.log('🔄 API failed, attempting fallback to DOM scraping...');
+    
+    try {
+      // Try to use existing DOM scraping method
+      const currentUrl = window.location.href;
+      const threadUrl = `https://threads.net/t/${threadId}/`;
+      
+      if (currentUrl.includes(threadId)) {
+        // We're already on the thread page
+        return this.extractRepliesFromCurrentPage();
+      } else {
+        // Would need to navigate - inform user
+        console.log('🚧 DOM scraping fallback requires page navigation');
+        return [];
+      }
+    } catch (error) {
+      console.error('❌ DOM scraping fallback also failed:', error);
+      return [];
+    }
+  }
+
+  private async cacheThreadData(threadId: string, data: CommentData[]): Promise<void> {
+    try {
+      const cacheData = {
+        data: data,
+        timestamp: Date.now(),
+        ttl: 300000 // 5 minutes
+      };
+      
+      await chrome.storage.local.set({
+        [`thread_cache_${threadId}`]: cacheData
+      });
+    } catch (error) {
+      console.warn('Failed to cache thread data:', error);
+    }
+  }
+
+  private async handleBackgroundMessage(message: any, sender: any, sendResponse: Function): Promise<void> {
+    switch (message.action) {
+      case 'apiStatusUpdate':
+        await this.handleAPIStatusUpdate(message);
+        sendResponse({ received: true });
+        break;
+        
+      case 'invalidateCache':
+        await this.handleCacheInvalidation(message.pattern);
+        sendResponse({ received: true });
+        break;
+        
+      default:
+        sendResponse({ received: false, error: 'Unknown action' });
+    }
+  }
+
+  private async handleAPIStatusUpdate(message: any): Promise<void> {
+    const { status, apiQuotaRemaining } = message;
+    
+    // Update UI indicators if present
+    const statusElement = document.querySelector('.threadforge-api-status');
+    if (statusElement) {
+      statusElement.textContent = status;
+      if (apiQuotaRemaining < 50) {
+        statusElement.classList.add('threadforge-quota-warning');
       }
     }
+    
+    console.log(`📡 API Status: ${status}, Quota remaining: ${apiQuotaRemaining}`);
+  }
+
+  private async handleCacheInvalidation(pattern: string): Promise<void> {
+    // Mark cache as invalidated
+    await chrome.storage.local.set({
+      cacheInvalidated: Date.now()
+    });
+    
+    console.log(`🗑️ Cache invalidated for pattern: ${pattern}`);
+  }
+
+  /**
+   * Loading State Management - Task 15
+   */
+  
+  public showLoadingState(container: HTMLElement, action: string): void {
+    this.clearLoadingState(container);
+    
+    const loadingMessages = {
+      'fetchThread': 'Loading thread...',
+      'fetchThreadReplies': 'Loading replies...',
+      'fetchUserProfile': 'Loading profile...'
+    };
+    
+    const message = loadingMessages[action as keyof typeof loadingMessages] || 'Loading...';
+    
+    const loadingDiv = document.createElement('div');
+    loadingDiv.className = 'threadforge-inline-expansion threadforge-loading';
+    loadingDiv.innerHTML = `
+      <div class="threadforge-loading-content">
+        <div class="threadforge-spinner"></div>
+        <span>${message}</span>
+        <div class="threadforge-progress" data-progress="0"></div>
+      </div>
+    `;
+    container.appendChild(loadingDiv);
+  }
+
+  public updateLoadingProgress(container: HTMLElement, progress: number): void {
+    const progressElement = container.querySelector('.threadforge-progress');
+    if (progressElement) {
+      progressElement.setAttribute('data-progress', progress.toString());
+      progressElement.textContent = `${progress}%`;
+    }
+  }
+
+  private clearLoadingState(container: HTMLElement): void {
+    const loadingElements = container.querySelectorAll('.threadforge-loading');
+    loadingElements.forEach(element => element.remove());
+  }
+
+  private async showErrorWithFallback(
+    container: HTMLElement, 
+    commentId: string, 
+    error: Error, 
+    originalUrl: string
+  ): Promise<void> {
+    const errorType = this.classifyError(error);
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'threadforge-inline-expansion threadforge-error';
+    
+    let fallbackMessage = '';
+    if (errorType === 'rate-limit') {
+      fallbackMessage = ' Will retry automatically in a few moments.';
+    } else if (errorType === 'network') {
+      fallbackMessage = ' Check your internet connection.';
+    } else if (errorType === 'auth') {
+      fallbackMessage = ' Please check your API credentials in settings.';
+    }
+
+    errorDiv.innerHTML = `
+      <div class="threadforge-error-content ${errorType}-error">
+        <span>❌ ${error.message}${fallbackMessage}</span>
+        <div class="threadforge-error-actions">
+          <button class="threadforge-retry-btn" data-url="${originalUrl}">
+            🔄 Try Again
+          </button>
+          <button class="threadforge-fallback-btn" data-url="${originalUrl}">
+            📄 Try DOM Fallback
+          </button>
+          <button class="threadforge-close-btn" data-threadforge-comment-id="${commentId}">
+            ✕ Close
+          </button>
+        </div>
+      </div>
+    `;
+
+    // Setup event listeners
+    this.setupErrorActionListeners(errorDiv, container, commentId, originalUrl);
+    container.appendChild(errorDiv);
+  }
+
+  private classifyError(error: Error): string {
+    const message = error.message.toLowerCase();
+    if (message.includes('rate limit') || message.includes('429')) return 'rate-limit';
+    if (message.includes('network') || message.includes('fetch')) return 'network';
+    if (message.includes('auth') || message.includes('401')) return 'auth';
+    if (message.includes('not found') || message.includes('404')) return 'not-found';
+    return 'generic';
+  }
+
+  private setupErrorActionListeners(
+    errorDiv: HTMLElement, 
+    container: HTMLElement, 
+    commentId: string, 
+    originalUrl: string
+  ): void {
+    // Retry button
+    const retryBtn = errorDiv.querySelector('.threadforge-retry-btn') as HTMLButtonElement;
+    retryBtn?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      errorDiv.remove();
+      await this.expandCommentInline(container, originalUrl);
+    });
+
+    // Fallback button  
+    const fallbackBtn = errorDiv.querySelector('.threadforge-fallback-btn') as HTMLButtonElement;
+    fallbackBtn?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      errorDiv.remove();
+      
+      const threadId = extractThreadId(originalUrl);
+      if (threadId) {
+        try {
+          const fallbackData = await this.fallbackToDOMScraping(threadId);
+          this.clearLoadingState(container);
+          const expansionDiv = this.createExpansionElement(fallbackData, commentId);
+          container.appendChild(expansionDiv);
+        } catch (fallbackError) {
+          console.error('Fallback also failed:', fallbackError);
+          await this.showErrorWithFallback(container, commentId, fallbackError as Error, originalUrl);
+        }
+      }
+    });
+
+    // Close button
+    const closeBtn = errorDiv.querySelector('.threadforge-close-btn') as HTMLButtonElement;
+    closeBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      errorDiv.remove();
+      this.onCommentClosed(commentId);
+    });
   }
 
   private getCommentId(element: HTMLElement): string {
     return `comment-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
   }
 
-  private createLoadingElement(): HTMLElement {
-    const loadingDiv = document.createElement('div');
-    loadingDiv.className = 'threadforge-inline-expansion threadforge-loading';
-    loadingDiv.innerHTML = `
-      <div class="threadforge-loading-content">
-        <div class="threadforge-spinner"></div>
-        <span>Loading replies...</span>
-      </div>
-    `;
-    return loadingDiv;
-  }
 
   private async fetchCommentData(url: string): Promise<CommentData[]> {
     try {

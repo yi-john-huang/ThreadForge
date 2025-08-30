@@ -124,7 +124,7 @@
 
 ## Content Script Refactoring
 
-- [ ] 15. Refactor click interception for API integration
+- [x] 15. Refactor click interception for API integration
   - Modify src/content.ts handleClick method to use message passing
   - Create extractThreadId() utility for parsing Threads URLs
   - Replace DOM scraping with API calls via background service
