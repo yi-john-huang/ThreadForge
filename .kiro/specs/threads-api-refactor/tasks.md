@@ -70,7 +70,7 @@
   - Write integration tests with mock API responses
   - _Requirements: 1.2, 1.3, 3.2_
 
-- [ ] 9. Add user profile and metadata endpoints
+- [x] 9. Add user profile and metadata endpoints
   - Implement getUserProfile(userId) method for author information
   - Add searchThreads(query) method for thread discovery
   - Create getThreadInsights(threadId) method for engagement metrics
@@ -80,7 +80,7 @@
 
 ## Cache Management System
 
-- [ ] 10. Create cache manager foundation
+- [x] 10. Create cache manager foundation
   - Create src/cache/cacheManager.ts with CacheManager class
   - Implement get<T>(key) and set<T>(key, value, ttl) methods
   - Add Chrome Storage API integration with both sync and local storage
@@ -88,7 +88,7 @@
   - Write unit tests for basic cache operations
   - _Requirements: 4.1, 4.2_
 
-- [ ] 11. Implement LRU eviction and TTL handling
+- [x] 11. Implement LRU eviction and TTL handling
   - Add LRU eviction policy with configurable cache size limits
   - Implement TTL expiration checking and automatic cleanup
   - Create cache statistics tracking (hit rate, size, etc.)
@@ -96,7 +96,7 @@
   - Write tests for eviction policies and TTL expiration
   - _Requirements: 4.4, 4.5, 8.2_
 
-- [ ] 12. Add cache invalidation and integrity management
+- [x] 12. Add cache invalidation and integrity management
   - Implement invalidate(pattern) method for targeted cache clearing
   - Add cache corruption detection and automatic recovery
   - Create cache warming strategies for frequently accessed data
