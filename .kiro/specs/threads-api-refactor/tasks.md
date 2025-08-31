@@ -132,7 +132,7 @@
   - Write tests for click interception and thread ID extraction
   - _Requirements: 3.1, 3.5_
 
-- [ ] 16. Update content script message handling
+- [x] 16. Update content script message handling
   - Add background service message listeners for API responses
   - Create error handling for API failures with fallback to DOM scraping
   - Implement progressive loading for large thread datasets

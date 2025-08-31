@@ -26,6 +26,8 @@ class ThreadForgeUIImprover {
   private expandedComments = new Set<string>();
   private isInitialized = false;
   public API_TIMEOUT = 10000; // 10 seconds timeout for API requests
+  private pendingRequests = new Map<string, any>(); // Track pending API requests
+  private statisticsCache = new Map<string, any>(); // Cache for usage statistics
 
   constructor() {
     this.init();
@@ -374,20 +376,688 @@ class ThreadForgeUIImprover {
   }
 
   private async handleBackgroundMessage(message: any, sender: any, sendResponse: Function): Promise<void> {
-    switch (message.action) {
-      case 'apiStatusUpdate':
-        await this.handleAPIStatusUpdate(message);
-        sendResponse({ received: true });
-        break;
-        
-      case 'invalidateCache':
-        await this.handleCacheInvalidation(message.pattern);
-        sendResponse({ received: true });
-        break;
-        
-      default:
-        sendResponse({ received: false, error: 'Unknown action' });
+    try {
+      switch (message.type || message.action) {
+        case 'apiResponse':
+          await this.handleAPIResponse(message);
+          sendResponse({ received: true });
+          break;
+          
+        case 'apiError':
+          await this.handleAPIError(message.error, message.requestId);
+          sendResponse({ received: true });
+          break;
+          
+        case 'serviceStatus':
+          await this.handleServiceStatusUpdate(message);
+          sendResponse({ received: true });
+          break;
+          
+        case 'cacheInvalidation':
+          await this.handleCacheInvalidation(message.pattern, message.reason);
+          sendResponse({ received: true });
+          break;
+          
+        case 'apiStatusUpdate': // Legacy support
+          await this.handleAPIStatusUpdate(message);
+          sendResponse({ received: true });
+          break;
+          
+        case 'invalidateCache': // Legacy support
+          await this.handleCacheInvalidation(message.pattern);
+          sendResponse({ received: true });
+          break;
+          
+        default:
+          sendResponse({ received: false, error: 'Unknown message type' });
+      }
+    } catch (error) {
+      console.error('Error handling background message:', error);
+      sendResponse({ received: false, error: error.message });
     }
+  }
+
+  /**
+   * Enhanced Message Handling - Task 16
+   */
+  
+  private async handleAPIResponse(message: any): Promise<void> {
+    const { requestId, success, data } = message;
+    
+    if (success) {
+      // Find pending request and resolve it
+      const pendingRequest = this.pendingRequests.get(requestId);
+      if (pendingRequest) {
+        pendingRequest.resolve({ success: true, data });
+        this.pendingRequests.delete(requestId);
+        
+        // Update statistics
+        await this.trackUsageStats('api_success', {
+          threadId: data.threadId,
+          responseTime: Date.now() - pendingRequest.startTime
+        });
+      }
+    }
+  }
+
+  private async handleAPIError(error: any, requestId: string): Promise<void> {
+    console.warn('🚨 API Error received:', error);
+    
+    const pendingRequest = this.pendingRequests.get(requestId);
+    if (pendingRequest) {
+      // Determine if we should attempt fallback
+      if (error.fallbackAvailable) {
+        await this.attemptErrorRecovery(error, requestId, pendingRequest);
+      } else {
+        pendingRequest.reject(new Error(error.message));
+        this.pendingRequests.delete(requestId);
+      }
+      
+      // Track error statistics
+      await this.trackErrorRecovery(error.type, false, {
+        attempts: 1,
+        strategy: 'none'
+      });
+    }
+  }
+
+  private async handleServiceStatusUpdate(message: any): Promise<void> {
+    const { status, apiQuota } = message;
+    
+    // Update UI status indicators
+    const statusElement = document.querySelector('.threadforge-api-status');
+    if (statusElement) {
+      statusElement.setAttribute('data-status', status);
+      statusElement.setAttribute('data-quota', apiQuota?.remaining?.toString() || '0');
+      statusElement.textContent = `API: ${status} (${apiQuota?.remaining || 0} remaining)`;
+      
+      if (apiQuota?.remaining < 50) {
+        statusElement.classList.add('threadforge-quota-warning');
+      } else {
+        statusElement.classList.remove('threadforge-quota-warning');
+      }
+    }
+    
+    console.log(`📡 Service Status: ${status}, Quota: ${apiQuota?.remaining || 0}`);
+  }
+
+  private async handleCacheInvalidation(pattern: string, reason?: string): Promise<void> {
+    await chrome.storage.local.set({
+      lastCacheInvalidation: Date.now(),
+      invalidationReason: reason || 'unknown'
+    });
+    
+    console.log(`🗑️ Cache invalidated for pattern: ${pattern}, reason: ${reason}`);
+  }
+
+  /**
+   * Error Recovery and Fallback Methods - Task 16
+   */
+  
+  public async fetchThreadWithFallback(threadId: string, container: HTMLElement): Promise<any> {
+    try {
+      // Try API first
+      const apiResult = await this.fetchThreadDataViaAPI(threadId);
+      return { success: true, data: apiResult, source: 'api' };
+    } catch (error) {
+      console.warn('🔄 API failed, attempting fallback methods...', error);
+      
+      try {
+        // Try DOM fallback
+        const fallbackData = await this.attemptDOMFallback(threadId, container);
+        if (fallbackData && fallbackData.length > 0) {
+          await this.trackUsageStats('fallback_used', {
+            threadId,
+            reason: 'api_failure'
+          });
+          return { success: true, data: fallbackData, source: 'fallback' };
+        }
+      } catch (fallbackError) {
+        console.warn('🔄 DOM fallback also failed:', fallbackError);
+      }
+      
+      // Try cached data as last resort
+      try {
+        const cachedData = await this.getCachedThreadData(threadId);
+        if (cachedData) {
+          this.showCacheIndicator(container);
+          return { 
+            success: true, 
+            data: { ...cachedData, _fromCache: true, _cacheAge: Date.now() - cachedData.timestamp },
+            source: 'cache' 
+          };
+        }
+      } catch (cacheError) {
+        console.warn('🔄 Cache retrieval failed:', cacheError);
+      }
+      
+      // All methods failed
+      this.showFallbackNotice(container, 'All data sources unavailable');
+      return { success: false, error: 'All fallback methods failed', source: 'none' };
+    }
+  }
+
+  private async attemptDOMFallback(threadId: string, container: HTMLElement): Promise<CommentData[]> {
+    this.showFallbackNotice(container, 'Using fallback method');
+    
+    // Use existing DOM scraping logic
+    const currentUrl = window.location.href;
+    if (currentUrl.includes(threadId)) {
+      return this.extractRepliesFromCurrentPage();
+    } else {
+      console.log('🚧 DOM fallback requires navigation to thread page');
+      return [];
+    }
+  }
+
+  private async getCachedThreadData(threadId: string): Promise<any> {
+    const result = await chrome.storage.local.get(`thread_cache_${threadId}`);
+    const cachedData = result[`thread_cache_${threadId}`];
+    
+    if (cachedData && Date.now() - cachedData.timestamp < cachedData.ttl) {
+      return cachedData;
+    }
+    
+    return null;
+  }
+
+  private showFallbackNotice(container: HTMLElement, message: string): void {
+    const notice = document.createElement('div');
+    notice.className = 'threadforge-fallback-notice';
+    notice.innerHTML = `
+      <div class="threadforge-notice-content">
+        <span>ℹ️ ${message}</span>
+      </div>
+    `;
+    container.appendChild(notice);
+  }
+
+  private showCacheIndicator(container: HTMLElement): void {
+    const indicator = document.createElement('div');
+    indicator.className = 'threadforge-cache-indicator';
+    indicator.innerHTML = `
+      <div class="threadforge-cache-content">
+        <span>📦 Showing cached data</span>
+      </div>
+    `;
+    container.appendChild(indicator);
+  }
+
+  public async fetchThreadWithRetry(threadId: string, container: HTMLElement, options: any = {}): Promise<any> {
+    const { maxRetries = 3, backoffMultiplier = 2, initialDelay = 1000 } = options;
+    let lastError: Error | null = null;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await this.fetchThreadDataViaAPI(threadId);
+        return { success: true, data: result, attempts: attempt };
+      } catch (error) {
+        lastError = error as Error;
+        
+        if (attempt < maxRetries) {
+          const delay = initialDelay * Math.pow(backoffMultiplier, attempt - 1);
+          await this.sleep(delay);
+        }
+      }
+    }
+    
+    // All retries failed, attempt fallback
+    const fallbackResult = await this.fetchThreadWithFallback(threadId, container);
+    return { ...fallbackResult, attempts: maxRetries };
+  }
+
+  public async handleRateLimitError(threadId: string, container: HTMLElement, options: any = {}): Promise<void> {
+    const { retryAfter = 5000 } = options;
+    
+    await this.showRateLimitCountdown(container, retryAfter);
+    await this.sleep(retryAfter);
+    
+    // Retry after waiting
+    try {
+      await this.fetchThreadWithFallback(threadId, container);
+    } catch (error) {
+      console.error('Retry after rate limit also failed:', error);
+    }
+  }
+
+  private async showRateLimitCountdown(container: HTMLElement, duration: number): Promise<void> {
+    const countdown = document.createElement('div');
+    countdown.className = 'threadforge-rate-limit-countdown';
+    
+    const updateCountdown = (remaining: number) => {
+      countdown.innerHTML = `
+        <div class="threadforge-countdown-content">
+          <span>⏳ Rate limited. Retrying in ${Math.ceil(remaining / 1000)} seconds...</span>
+        </div>
+      `;
+    };
+    
+    container.appendChild(countdown);
+    
+    const startTime = Date.now();
+    const interval = setInterval(() => {
+      const remaining = duration - (Date.now() - startTime);
+      if (remaining <= 0) {
+        clearInterval(interval);
+        countdown.remove();
+      } else {
+        updateCountdown(remaining);
+      }
+    }, 1000);
+    
+    updateCountdown(duration);
+  }
+
+  private async attemptErrorRecovery(error: any, requestId: string, pendingRequest: any): Promise<void> {
+    console.log('🔧 Attempting error recovery for:', error.type);
+    
+    // Implement recovery based on error type
+    switch (error.type) {
+      case 'RATE_LIMIT_EXCEEDED':
+        await this.handleRateLimitRecovery(error, requestId, pendingRequest);
+        break;
+      case 'AUTHENTICATION_FAILED':
+        await this.handleAuthRecovery(error, requestId, pendingRequest);
+        break;
+      default:
+        // General fallback
+        await this.handleGeneralErrorRecovery(error, requestId, pendingRequest);
+    }
+  }
+
+  private async handleRateLimitRecovery(error: any, requestId: string, pendingRequest: any): Promise<void> {
+    const retryAfter = error.retryAfter || 60000; // Default 1 minute
+    
+    setTimeout(async () => {
+      try {
+        // Retry the original request
+        const result = await this.retryOriginalRequest(pendingRequest);
+        pendingRequest.resolve(result);
+        this.pendingRequests.delete(requestId);
+        
+        await this.trackErrorRecovery('rate_limit', true, {
+          attempts: 2,
+          recoveryTime: retryAfter,
+          strategy: 'wait_and_retry'
+        });
+      } catch (retryError) {
+        pendingRequest.reject(retryError);
+        this.pendingRequests.delete(requestId);
+      }
+    }, retryAfter);
+  }
+
+  private async handleAuthRecovery(error: any, requestId: string, pendingRequest: any): Promise<void> {
+    // For auth errors, immediately use fallback
+    try {
+      const fallbackData = await this.fallbackToDOMScraping(pendingRequest.threadId);
+      pendingRequest.resolve({ success: true, data: fallbackData, source: 'fallback' });
+      this.pendingRequests.delete(requestId);
+    } catch (fallbackError) {
+      pendingRequest.reject(fallbackError);
+      this.pendingRequests.delete(requestId);
+    }
+  }
+
+  private async handleGeneralErrorRecovery(error: any, requestId: string, pendingRequest: any): Promise<void> {
+    // Try fallback for general errors
+    try {
+      const fallbackData = await this.fallbackToDOMScraping(pendingRequest.threadId);
+      pendingRequest.resolve({ success: true, data: fallbackData, source: 'fallback' });
+      this.pendingRequests.delete(requestId);
+    } catch (fallbackError) {
+      pendingRequest.reject(fallbackError);
+      this.pendingRequests.delete(requestId);
+    }
+  }
+
+  private async retryOriginalRequest(pendingRequest: any): Promise<any> {
+    // Recreate the original request
+    return await this.fetchThreadDataViaAPI(pendingRequest.threadId);
+  }
+
+  /**
+   * Progressive Loading Methods - Task 16
+   */
+  
+  public async loadThreadProgressively(threadId: string, container: HTMLElement, options: any = {}): Promise<void> {
+    const { batchSize = 25, loadDelay = 100 } = options;
+    
+    try {
+      const threadData = await this.fetchThreadDataViaAPI(threadId);
+      const replies = threadData.replies || threadData;
+      
+      if (replies.length <= batchSize) {
+        // Small dataset, load normally
+        const expansion = this.createExpansionElement(replies, this.getCommentId(container));
+        container.appendChild(expansion);
+        return;
+      }
+      
+      // Large dataset, use progressive loading
+      await this.renderProgressiveBatches(replies, container, batchSize, loadDelay);
+      
+    } catch (error) {
+      console.error('Progressive loading failed:', error);
+      await this.showErrorWithFallback(container, this.getCommentId(container), error as Error, `https://threads.net/t/${threadId}/`);
+    }
+  }
+
+  private async renderProgressiveBatches(replies: CommentData[], container: HTMLElement, batchSize: number, loadDelay: number): Promise<void> {
+    const totalBatches = Math.ceil(replies.length / batchSize);
+    const mainContainer = document.createElement('div');
+    mainContainer.className = 'threadforge-progressive-container';
+    
+    // Render first batch immediately
+    const firstBatch = replies.slice(0, batchSize);
+    const firstBatchContainer = this.createBatchContainer(firstBatch, 0);
+    mainContainer.appendChild(firstBatchContainer);
+    
+    // Add load more button if there are more batches
+    if (totalBatches > 1) {
+      const loadMoreBtn = this.createLoadMoreButton(replies, batchSize, mainContainer, loadDelay);
+      mainContainer.appendChild(loadMoreBtn);
+    }
+    
+    container.appendChild(mainContainer);
+  }
+
+  private createBatchContainer(replies: CommentData[], batchIndex: number): HTMLElement {
+    const batchContainer = document.createElement('div');
+    batchContainer.className = 'threadforge-reply-batch';
+    batchContainer.setAttribute('data-batch', batchIndex.toString());
+    
+    replies.forEach(reply => {
+      const replyElement = document.createElement('div');
+      replyElement.className = 'threadforge-reply';
+      replyElement.innerHTML = this.createReplyHTML(reply);
+      batchContainer.appendChild(replyElement);
+    });
+    
+    return batchContainer;
+  }
+
+  private createLoadMoreButton(allReplies: CommentData[], batchSize: number, container: HTMLElement, loadDelay: number): HTMLElement {
+    const button = document.createElement('button');
+    button.className = 'threadforge-load-more-btn';
+    button.textContent = `Load More (${allReplies.length - batchSize} remaining)`;
+    
+    let currentBatch = 1;
+    button.addEventListener('click', async () => {
+      const startIndex = currentBatch * batchSize;
+      const endIndex = Math.min(startIndex + batchSize, allReplies.length);
+      const nextBatch = allReplies.slice(startIndex, endIndex);
+      
+      if (nextBatch.length > 0) {
+        // Show loading state
+        button.textContent = 'Loading...';
+        button.disabled = true;
+        
+        await this.sleep(loadDelay);
+        
+        // Add the batch
+        const batchContainer = this.createBatchContainer(nextBatch, currentBatch);
+        container.insertBefore(batchContainer, button);
+        
+        currentBatch++;
+        const remaining = allReplies.length - (currentBatch * batchSize);
+        
+        if (remaining > 0) {
+          button.textContent = `Load More (${remaining} remaining)`;
+          button.disabled = false;
+        } else {
+          button.remove();
+        }
+      }
+    });
+    
+    return button;
+  }
+
+  public async enableVirtualScrolling(container: HTMLElement, replies: CommentData[], options: any = {}): Promise<void> {
+    const { itemHeight = 120, containerHeight = 600, bufferSize = 5 } = options;
+    
+    const virtualContainer = document.createElement('div');
+    virtualContainer.className = 'threadforge-virtual-scroll';
+    virtualContainer.style.height = `${containerHeight}px`;
+    virtualContainer.style.overflow = 'auto';
+    
+    const contentContainer = document.createElement('div');
+    contentContainer.style.height = `${replies.length * itemHeight}px`;
+    contentContainer.style.position = 'relative';
+    
+    virtualContainer.appendChild(contentContainer);
+    container.appendChild(virtualContainer);
+    
+    const renderVisibleItems = () => {
+      const scrollTop = virtualContainer.scrollTop;
+      const startIndex = Math.floor(scrollTop / itemHeight);
+      const endIndex = Math.min(startIndex + Math.ceil(containerHeight / itemHeight) + bufferSize, replies.length);
+      
+      // Clear existing items
+      contentContainer.innerHTML = '';
+      
+      // Render visible items
+      for (let i = startIndex; i < endIndex; i++) {
+        const reply = replies[i];
+        const itemElement = document.createElement('div');
+        itemElement.className = 'threadforge-reply';
+        itemElement.setAttribute('data-virtual', 'true');
+        itemElement.style.position = 'absolute';
+        itemElement.style.top = `${i * itemHeight}px`;
+        itemElement.style.height = `${itemHeight}px`;
+        itemElement.innerHTML = this.createReplyHTML(reply);
+        
+        contentContainer.appendChild(itemElement);
+      }
+    };
+    
+    // Initial render
+    renderVisibleItems();
+    
+    // Scroll event handler
+    this.handleVirtualScroll = () => renderVisibleItems();
+    virtualContainer.addEventListener('scroll', this.handleVirtualScroll);
+  }
+
+  public handleVirtualScroll: (() => void) | undefined;
+
+  public async loadWithProgress(threadId: string, container: HTMLElement, options: any = {}): Promise<void> {
+    const { onProgress, totalBatches = 1 } = options;
+    
+    for (let i = 0; i < totalBatches; i++) {
+      // Simulate batch loading
+      await this.sleep(200);
+      
+      const progress = {
+        completed: i + 1,
+        total: totalBatches,
+        percentage: Math.round(((i + 1) / totalBatches) * 100)
+      };
+      
+      if (onProgress) {
+        onProgress(progress);
+      }
+      
+      // Update progress bar if present
+      const progressBar = container.querySelector('.threadforge-progress-bar');
+      if (progressBar) {
+        progressBar.setAttribute('data-progress', progress.percentage.toString());
+        (progressBar as HTMLElement).style.width = `${progress.percentage}%`;
+      }
+    }
+  }
+
+  public async performMemoryCleanup(container: HTMLElement, options: any = {}): Promise<void> {
+    const { maxVisibleReplies = 50, cleanupThreshold = 75 } = options;
+    
+    const allReplies = container.querySelectorAll('.threadforge-reply');
+    
+    if (allReplies.length > cleanupThreshold) {
+      // Hide replies that are far from the current viewport
+      const containerRect = container.getBoundingClientRect();
+      let visibleCount = 0;
+      
+      allReplies.forEach(reply => {
+        const replyRect = reply.getBoundingClientRect();
+        const isVisible = replyRect.top < containerRect.bottom + 200 && replyRect.bottom > containerRect.top - 200;
+        
+        if (isVisible && visibleCount < maxVisibleReplies) {
+          reply.classList.remove('threadforge-hidden');
+          visibleCount++;
+        } else {
+          reply.classList.add('threadforge-hidden');
+          (reply as HTMLElement).style.display = 'none';
+        }
+      });
+      
+      console.log(`🧹 Memory cleanup: ${visibleCount} visible, ${allReplies.length - visibleCount} hidden`);
+    }
+  }
+
+  /**
+   * Statistics Tracking Methods - Task 16
+   */
+  
+  public async trackUsageStats(eventType: string, data: any = {}): Promise<void> {
+    try {
+      const currentStats = await chrome.storage.local.get(['clickInterceptionStats', 'usageStats']);
+      
+      const clickStats = currentStats.clickInterceptionStats || {
+        totalClicks: 0,
+        interceptedClicks: 0,
+        successfulExpansions: 0,
+        apiRequestCount: 0,
+        fallbackUsageCount: 0
+      };
+      
+      const usageStats = currentStats.usageStats || {
+        apiSuccessCount: 0,
+        fallbackUsageCount: 0,
+        averageApiResponseTime: 0,
+        totalResponseTime: 0
+      };
+      
+      // Update based on event type
+      switch (eventType) {
+        case 'api_success':
+          clickStats.apiRequestCount++;
+          clickStats.successfulExpansions++;
+          usageStats.apiSuccessCount++;
+          
+          if (data.responseTime) {
+            usageStats.totalResponseTime += data.responseTime;
+            usageStats.averageApiResponseTime = usageStats.totalResponseTime / usageStats.apiSuccessCount;
+          }
+          break;
+          
+        case 'fallback_used':
+          clickStats.fallbackUsageCount++;
+          usageStats.fallbackUsageCount++;
+          break;
+          
+        case 'click_intercepted':
+          clickStats.totalClicks++;
+          clickStats.interceptedClicks++;
+          break;
+      }
+      
+      await chrome.storage.local.set({
+        clickInterceptionStats: clickStats,
+        usageStats: usageStats
+      });
+    } catch (error) {
+      console.warn('Failed to track usage stats:', error);
+    }
+  }
+
+  public async trackErrorRecovery(errorType: string, success: boolean, details: any = {}): Promise<void> {
+    try {
+      const result = await chrome.storage.local.get('errorRecoveryStats');
+      const stats = result.errorRecoveryStats || {
+        totalRecoveryAttempts: 0,
+        successfulRecoveries: 0,
+        recoverySuccessRate: 0,
+        averageRecoveryTime: 0,
+        totalRecoveryTime: 0
+      };
+      
+      stats.totalRecoveryAttempts++;
+      
+      if (success) {
+        stats.successfulRecoveries++;
+        
+        if (details.recoveryTime) {
+          stats.totalRecoveryTime += details.recoveryTime;
+          stats.averageRecoveryTime = stats.totalRecoveryTime / stats.successfulRecoveries;
+        }
+      }
+      
+      stats.recoverySuccessRate = stats.successfulRecoveries / stats.totalRecoveryAttempts;
+      
+      await chrome.storage.local.set({ errorRecoveryStats: stats });
+    } catch (error) {
+      console.warn('Failed to track error recovery stats:', error);
+    }
+  }
+
+  public async generateUsageReport(): Promise<any> {
+    try {
+      const result = await chrome.storage.local.get(['clickInterceptionStats', 'usageStats']);
+      const clickStats = result.clickInterceptionStats || {};
+      const usageStats = result.usageStats || {};
+      
+      const totalThreadsViewed = clickStats.successfulExpansions || 0;
+      const interceptionRate = clickStats.totalClicks > 0 ? clickStats.interceptedClicks / clickStats.totalClicks : 0;
+      const expansionSuccessRate = clickStats.interceptedClicks > 0 ? clickStats.successfulExpansions / clickStats.interceptedClicks : 0;
+      const apiReliability = totalThreadsViewed > 0 ? usageStats.apiSuccessCount / totalThreadsViewed : 0;
+      const fallbackUsageRate = totalThreadsViewed > 0 ? usageStats.fallbackUsageCount / totalThreadsViewed : 0;
+      
+      return {
+        interceptionRate,
+        expansionSuccessRate,
+        apiReliability,
+        fallbackUsageRate,
+        totalThreadsViewed,
+        averageApiResponseTime: usageStats.averageApiResponseTime || 0,
+        timestamp: Date.now()
+      };
+    } catch (error) {
+      console.error('Failed to generate usage report:', error);
+      return {};
+    }
+  }
+
+  public async resetUsageStatistics(): Promise<void> {
+    const resetTimestamp = Date.now();
+    
+    await chrome.storage.local.set({
+      clickInterceptionStats: {
+        totalClicks: 0,
+        interceptedClicks: 0,
+        successfulExpansions: 0,
+        apiRequestCount: 0,
+        fallbackUsageCount: 0,
+        resetTimestamp
+      },
+      usageStats: {
+        apiSuccessCount: 0,
+        fallbackUsageCount: 0,
+        averageApiResponseTime: 0,
+        totalResponseTime: 0,
+        resetTimestamp
+      },
+      errorRecoveryStats: {
+        totalRecoveryAttempts: 0,
+        successfulRecoveries: 0,
+        recoverySuccessRate: 0,
+        averageRecoveryTime: 0,
+        totalRecoveryTime: 0,
+        resetTimestamp
+      }
+    });
+    
+    console.log('📊 Usage statistics reset');
   }
 
   private async handleAPIStatusUpdate(message: any): Promise<void> {
