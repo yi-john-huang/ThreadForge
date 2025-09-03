@@ -142,7 +142,7 @@
 
 ## Thread Rendering and UI Components
 
-- [ ] 17. Create thread data renderer with API data
+- [x] 17. Create thread data renderer with API data
   - Refactor createExpansionElement() to use ThreadData and ReplyData types
   - Implement hierarchical reply rendering with proper nesting
   - Add collapsible sections for deeply nested threads
@@ -150,7 +150,7 @@
   - Write unit tests for thread rendering logic
   - _Requirements: 3.2, 3.3, 3.4, 3.5_
 
-- [ ] 18. Enhance UI components with API-powered features
+- [x] 18. Enhance UI components with API-powered features
   - Add real-time engagement metrics display (likes, reposts)
   - Implement user profile integration with avatars and verification badges
   - Create improved timestamp formatting with relative times
@@ -158,7 +158,7 @@
   - Write tests for UI component rendering and interactions
   - _Requirements: 3.2, 3.3, 3.6_
 
-- [ ] 19. Implement virtual scrolling for large threads
+- [x] 19. Implement virtual scrolling for large threads
   - Add virtual scrolling container for threads with 100+ replies
   - Create windowing logic to render only visible items
   - Implement smooth scrolling and item height calculation
@@ -168,7 +168,7 @@
 
 ## Settings and Configuration Management
 
-- [ ] 20. Create API credentials management
+- [x] 20. Create API credentials management
   - Update src/popup.ts with OAuth2 authentication UI
   - Add "Connect Account" button and authentication status display
   - Implement credential validation before saving settings
@@ -176,7 +176,7 @@
   - Write tests for settings persistence and validation
   - _Requirements: 6.1, 6.3, 6.5_
 
-- [ ] 21. Add real-time settings application
+- [x] 21. Add real-time settings application
   - Implement settings change broadcasting to all extension components
   - Add toggles for API vs DOM scraping modes
   - Create immediate setting application without extension restart
@@ -186,7 +186,7 @@
 
 ## Migration and Compatibility Layer
 
-- [ ] 22. Implement hybrid architecture for gradual migration
+- [x] 22. Implement hybrid architecture for gradual migration
   - Create src/migration/compatibilityLayer.ts for fallback logic
   - Add feature flag system for A/B testing API vs DOM approaches
   - Implement automatic fallback when API is unavailable
